@@ -1,23 +1,82 @@
-# Графический интерфейс
+# Графический интерфейс 
 
 import os
+import re
+from typing import List, Dict, Any
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QGroupBox, QCheckBox, QRadioButton, QSpinBox,
-    QComboBox, QTextEdit, QFileDialog, QMessageBox, QProgressBar,
-    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QFrame
+    QComboBox, QFileDialog, QMessageBox, QProgressBar,
+    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QTextEdit
 )
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QPalette, QColor
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QIcon, QColor
+
+# Импортируем модули
+try:
+    from file_manager import FileManager
+    from rules_engine import RulesEngine
+    from exif_processor import EXIFProcessor
+    from undo_manager import UndoManager
+except ImportError as e:
+    print(f"Ошибка импорта модулей: {e}")
+    print("Убедитесь, что все файлы находятся в одной директории:")
+    print("  file_manager.py, rules_engine.py, exif_processor.py, undo_manager.py")
+    raise
+
+
+class PreviewWorker(QThread):
+    # Воркер для предпросмотра изменений в отдельном потоке
+    preview_finished = pyqtSignal(dict)
+    progress_updated = pyqtSignal(int)
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, files: List[str], rules: Dict[str, Any], folder_path: str):
+        super().__init__()
+        self.files = files
+        self.rules = rules
+        self.folder_path = folder_path
+        
+    def run(self):
+        # Выполнение предпросмотра в фоновом потоке
+        try:
+            results = {}
+            total_files = len(self.files)
+            
+            for i, file_name in enumerate(self.files):
+                # Обновляем прогресс
+                progress = int((i + 1) / total_files * 100)
+                self.progress_updated.emit(progress)
+                
+                # Применяем правила
+                new_name = RulesEngine.generate_new_name(file_name, i, self.rules)
+                
+                # Применяем EXIF данные если нужно
+                if self.rules.get('enable_exif', False):
+                    file_path = os.path.join(self.folder_path, file_name)
+                    new_name = EXIFProcessor.add_exif_to_filename(new_name, file_path, self.rules)
+                
+                results[file_name] = new_name
+            
+            self.preview_finished.emit(results)
+            
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
 
 class RenamerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.file_manager = FileManager()
+        self.undo_manager = UndoManager()
+        self.current_files = []
+        self.current_folder = ""
+        self.preview_results = {}
         self.setup_ui()
         
     def setup_ui(self):
-        # Настройка пользовательского интерфейса
+        #Настройка пользовательского интерфейса
         self.setWindowTitle("Массовое переименование файлов")
         self.setGeometry(100, 100, 1200, 800)
         
@@ -65,7 +124,7 @@ class RenamerWindow(QMainWindow):
         main_layout.addWidget(status_widget)
         
     def create_folder_section(self):
-        # Создание секции выбора папки
+        # Секции выбора папки
         group = QGroupBox("📁 Выбор папки с файлами")
         group.setStyleSheet("""
             QGroupBox {
@@ -121,7 +180,7 @@ class RenamerWindow(QMainWindow):
                 background-color: #21618c;
             }
         """)
-        browse_btn.clicked.connect(self.dummy_browse)
+        browse_btn.clicked.connect(self.browse_folder)
         layout.addWidget(browse_btn)
         
         # Кнопка загрузки
@@ -144,14 +203,14 @@ class RenamerWindow(QMainWindow):
                 background-color: #219653;
             }
         """)
-        load_btn.clicked.connect(self.dummy_load)
+        load_btn.clicked.connect(self.load_files)
         layout.addWidget(load_btn)
         
         group.setLayout(layout)
         return group
         
     def create_file_list_section(self):
-        # Создание секции со списком файлов
+        # Секции со списком файлов
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
@@ -200,61 +259,11 @@ class RenamerWindow(QMainWindow):
         self.file_table.setColumnWidth(0, 40)
         self.file_table.setColumnWidth(3, 100)
         
-        # Добавление демо-данных
-        self.add_demo_data()
-        
         layout.addWidget(self.file_table)
         return widget
         
-    def add_demo_data(self):
-        # Добавление демо-данных в таблицу
-        demo_files = [
-            ("IMG_20231201_001.jpg", "2023-12-01_photo_001.jpg", "✅ Изменено"),
-            ("DSC_0456.JPG", "2023-11-15_vacation_002.jpg", "✅ Изменено"),
-            ("document_old.pdf", "document_new.pdf", "✅ Изменено"),
-            ("scan001.png", "scan001.png", "⏳ Ожидание"),
-            ("IMG_1234.jpg", "IMG_1234.jpg", "⏳ Ожидание"),
-            ("report_final.docx", "2023_report_final.docx", "✅ Изменено"),
-            ("picture.png", "holiday_picture.png", "✅ Изменено"),
-            ("data_backup.zip", "data_backup.zip", "⏳ Ожидание")
-        ]
-        
-        self.file_table.setRowCount(len(demo_files))
-        
-        for i, (old_name, new_name, status) in enumerate(demo_files):
-            # Номер
-            num_item = QTableWidgetItem(str(i + 1))
-            num_item.setTextAlignment(Qt.AlignCenter)
-            num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
-            self.file_table.setItem(i, 0, num_item)
-            
-            # Текущее имя
-            old_item = QTableWidgetItem(old_name)
-            old_item.setFlags(old_item.flags() & ~Qt.ItemIsEditable)
-            self.file_table.setItem(i, 1, old_item)
-            
-            # Новое имя
-            new_item = QTableWidgetItem(new_name)
-            new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
-            self.file_table.setItem(i, 2, new_item)
-            
-            # Статус
-            status_item = QTableWidgetItem(status)
-            status_item.setTextAlignment(Qt.AlignCenter)
-            status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
-            
-            # Цветовая маркировка статуса
-            if "Изменено" in status:
-                status_item.setBackground(QColor("#d5f4e6"))
-                status_item.setForeground(QColor("#27ae60"))
-            else:
-                status_item.setBackground(QColor("#fff9e6"))
-                status_item.setForeground(QColor("#f39c12"))
-                
-            self.file_table.setItem(i, 3, status_item)
-            
     def create_rules_section(self):
-        #Создание секции с правилами переименования
+        # Секции с правилами переименования
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
@@ -303,7 +312,7 @@ class RenamerWindow(QMainWindow):
         return widget
         
     def create_text_replace_tab(self):
-        #Вкладка 'Замена текста'
+        # Вкладка 'Замена текста'
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -319,6 +328,12 @@ class RenamerWindow(QMainWindow):
         """)
         
         form = QFormLayout()
+        
+        # Чекбокс включения замены текста
+        self.enable_replace = QCheckBox("Включить замену текста")
+        self.enable_replace.setChecked(True)
+        self.enable_replace.stateChanged.connect(self.toggle_replace_fields)
+        form.addRow(self.enable_replace)
         
         # Заменить
         self.replace_from = QLineEdit()
@@ -349,8 +364,23 @@ class RenamerWindow(QMainWindow):
         
         self.tab_widget.addTab(tab, "Замена")
         
+    def toggle_replace_fields(self):
+        """Включение/выключение полей замены текста"""
+        enabled = self.enable_replace.isChecked()
+        self.replace_from.setEnabled(enabled)
+        self.replace_to.setEnabled(enabled)
+        self.case_sensitive.setEnabled(enabled)
+        self.replace_all.setEnabled(enabled)
+        
+        # Меняем стиль для отключенных полей
+        style = "color: #7f8c8d;" if not enabled else ""
+        self.replace_from.setStyleSheet(style)
+        self.replace_to.setStyleSheet(style)
+        self.case_sensitive.setStyleSheet(style)
+        self.replace_all.setStyleSheet(style)
+        
     def create_prefix_suffix_tab(self):
-        #Вкладка 'Префикс/Суффикс'
+        # Вкладка 'Префикс/Суффикс'
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -367,6 +397,12 @@ class RenamerWindow(QMainWindow):
         
         form = QFormLayout()
         
+        # Чекбокс включения префикса/суффикса
+        self.enable_prefix_suffix = QCheckBox("Включить префикс/суффикс")
+        self.enable_prefix_suffix.setChecked(True)
+        self.enable_prefix_suffix.stateChanged.connect(self.toggle_prefix_suffix_fields)
+        form.addRow(self.enable_prefix_suffix)
+        
         # Префикс
         self.prefix_text = QLineEdit()
         self.prefix_text.setPlaceholderText("Например: vacation_")
@@ -382,8 +418,8 @@ class RenamerWindow(QMainWindow):
         suffix_layout = QVBoxLayout()
         
         self.suffix_before_ext = QRadioButton("Перед расширением (file_suffix.ext)")
-        self.suffix_after_ext = QRadioButton("После расширения (file.ext_suffix)")
         self.suffix_before_ext.setChecked(True)
+        self.suffix_after_ext = QRadioButton("После расширения (file.ext_suffix)")
         
         suffix_layout.addWidget(self.suffix_before_ext)
         suffix_layout.addWidget(self.suffix_after_ext)
@@ -402,8 +438,21 @@ class RenamerWindow(QMainWindow):
         
         self.tab_widget.addTab(tab, "Префикс/Суффикс")
         
+    def toggle_prefix_suffix_fields(self):
+        """Включение/выключение полей префикса/суффикса"""
+        enabled = self.enable_prefix_suffix.isChecked()
+        self.prefix_text.setEnabled(enabled)
+        self.suffix_text.setEnabled(enabled)
+        self.suffix_before_ext.setEnabled(enabled)
+        self.suffix_after_ext.setEnabled(enabled)
+        
+        # Меняем стиль для отключенных полей
+        style = "color: #7f8c8d;" if not enabled else ""
+        self.prefix_text.setStyleSheet(style)
+        self.suffix_text.setStyleSheet(style)
+        
     def create_numbering_tab(self):
-        #Вкладка 'Нумерация'
+        """Вкладка 'Нумерация'"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -419,6 +468,12 @@ class RenamerWindow(QMainWindow):
         """)
         
         form = QFormLayout()
+        
+        # Чекбокс включения нумерации
+        self.enable_numbering = QCheckBox("Включить нумерацию")
+        self.enable_numbering.setChecked(True)
+        self.enable_numbering.stateChanged.connect(self.toggle_numbering_fields)
+        form.addRow(self.enable_numbering)
         
         # Начальный номер
         start_layout = QHBoxLayout()
@@ -470,8 +525,21 @@ class RenamerWindow(QMainWindow):
         
         self.tab_widget.addTab(tab, "Нумерация")
         
+    def toggle_numbering_fields(self):
+        """Включение/выключение полей нумерации"""
+        enabled = self.enable_numbering.isChecked()
+        self.start_number.setEnabled(enabled)
+        self.digits_count.setEnabled(enabled)
+        self.number_separator.setEnabled(enabled)
+        self.number_prefix.setEnabled(enabled)
+        self.number_suffix.setEnabled(enabled)
+        
+        # Меняем стиль для отключенных полей
+        style = "color: #7f8c8d;" if not enabled else ""
+        self.number_separator.setStyleSheet(style)
+        
     def create_regex_tab(self):
-        #Вкладка 'Регулярные выражения'
+        # Вкладка 'Регулярные выражения'
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -487,6 +555,12 @@ class RenamerWindow(QMainWindow):
         """)
         
         form = QFormLayout()
+        
+        # Чекбокс включения регулярных выражений
+        self.enable_regex = QCheckBox("Включить регулярные выражения")
+        self.enable_regex.setChecked(True)
+        self.enable_regex.stateChanged.connect(self.toggle_regex_fields)
+        form.addRow(self.enable_regex)
         
         # Паттерн
         self.regex_pattern = QLineEdit()
@@ -529,8 +603,21 @@ class RenamerWindow(QMainWindow):
         
         self.tab_widget.addTab(tab, "Регулярки")
         
+    def toggle_regex_fields(self):
+        """Включение/выключение полей регулярных выражений"""
+        enabled = self.enable_regex.isChecked()
+        self.regex_pattern.setEnabled(enabled)
+        self.regex_replacement.setEnabled(enabled)
+        self.regex_ignore_case.setEnabled(enabled)
+        self.regex_dotall.setEnabled(enabled)
+        
+        # Меняем стиль для отключенных полей
+        style = "color: #7f8c8d;" if not enabled else ""
+        self.regex_pattern.setStyleSheet(style)
+        self.regex_replacement.setStyleSheet(style)
+        
     def create_exif_tab(self):
-        #Вкладка 'EXIF данные'
+        # Вкладка 'EXIF данные'
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -548,8 +635,10 @@ class RenamerWindow(QMainWindow):
         form = QFormLayout()
         
         # Включить EXIF
-        self.use_exif = QCheckBox("Использовать дату съемки из EXIF")
-        form.addRow(self.use_exif)
+        self.enable_exif = QCheckBox("Включить EXIF данные")
+        self.enable_exif.setChecked(True)
+        self.enable_exif.stateChanged.connect(self.toggle_exif_fields)
+        form.addRow(self.enable_exif)
         
         # Формат даты
         format_layout = QHBoxLayout()
@@ -569,8 +658,8 @@ class RenamerWindow(QMainWindow):
         # Позиция даты
         date_pos_layout = QHBoxLayout()
         self.date_prefix = QRadioButton("Префикс")
-        self.date_suffix = QRadioButton("Суффикс")
         self.date_prefix.setChecked(True)
+        self.date_suffix = QRadioButton("Суффикс")
         
         date_pos_layout.addWidget(self.date_prefix)
         date_pos_layout.addWidget(self.date_suffix)
@@ -608,8 +697,23 @@ class RenamerWindow(QMainWindow):
         
         self.tab_widget.addTab(tab, "EXIF")
         
+    def toggle_exif_fields(self):
+        """Включение/выключение полей EXIF"""
+        enabled = self.enable_exif.isChecked()
+        self.date_format.setEnabled(enabled)
+        self.date_prefix.setEnabled(enabled)
+        self.date_suffix.setEnabled(enabled)
+        self.exif_separator.setEnabled(enabled)
+        self.use_camera_model.setEnabled(enabled)
+        self.use_exposure.setEnabled(enabled)
+        self.use_gps.setEnabled(enabled)
+        
+        # Меняем стиль для отключенных полей
+        style = "color: #7f8c8d;" if not enabled else ""
+        self.exif_separator.setStyleSheet(style)
+        
     def create_advanced_tab(self):
-        #Вкладка 'Дополнительно'
+        # Вкладка 'Дополнительно'
         tab = QWidget()
         layout = QVBoxLayout(tab)
     
@@ -677,14 +781,14 @@ class RenamerWindow(QMainWindow):
         sort_layout = QVBoxLayout()
 
         self.sort_by_name = QRadioButton("По имени")
+        self.sort_by_name.setChecked(True)
         self.sort_by_date = QRadioButton("По дате создания")
         self.sort_by_size = QRadioButton("По размеру")
-        self.sort_by_name.setChecked(True)
     
         sort_order_layout = QHBoxLayout()
         self.sort_asc = QRadioButton("По возрастанию")
-        self.sort_desc = QRadioButton("По убыванию")
         self.sort_asc.setChecked(True)
+        self.sort_desc = QRadioButton("По убыванию")
     
         sort_order_layout.addWidget(self.sort_asc)
         sort_order_layout.addWidget(self.sort_desc)
@@ -703,10 +807,13 @@ class RenamerWindow(QMainWindow):
         self.tab_widget.addTab(tab, "Дополнительно")
         
     def create_action_buttons(self):
-        #Создание секции с кнопками действий
+        # Создание секции с кнопками действий
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setSpacing(10)
+        
+        # Добавляем растяжение для центрирования кнопок
+        layout.addStretch(1)
         
         # Стили для кнопок
         button_style = """
@@ -720,8 +827,8 @@ class RenamerWindow(QMainWindow):
         """
         
         # Кнопка предпросмотра
-        preview_btn = QPushButton("👁️ Предпросмотр")
-        preview_btn.setStyleSheet(button_style + """
+        self.preview_btn = QPushButton("👁️ Предпросмотр")
+        self.preview_btn.setStyleSheet(button_style + """
             QPushButton {
                 background-color: #3498db;
                 color: white;
@@ -729,13 +836,18 @@ class RenamerWindow(QMainWindow):
             QPushButton:hover {
                 background-color: #2980b9;
             }
+            QPushButton:disabled {
+                background-color: #95a5a6;
+                color: #7f8c8d;
+            }
         """)
-        preview_btn.clicked.connect(self.dummy_preview)
-        layout.addWidget(preview_btn)
+        self.preview_btn.clicked.connect(self.preview_changes)
+        self.preview_btn.setEnabled(False)
+        layout.addWidget(self.preview_btn)
         
         # Кнопка применения
-        apply_btn = QPushButton("✅ Применить переименование")
-        apply_btn.setStyleSheet(button_style + """
+        self.apply_btn = QPushButton("✅ Применить переименование")
+        self.apply_btn.setStyleSheet(button_style + """
             QPushButton {
                 background-color: #2ecc71;
                 color: white;
@@ -743,13 +855,18 @@ class RenamerWindow(QMainWindow):
             QPushButton:hover {
                 background-color: #27ae60;
             }
+            QPushButton:disabled {
+                background-color: #95a5a6;
+                color: #7f8c8d;
+            }
         """)
-        apply_btn.clicked.connect(self.dummy_apply)
-        layout.addWidget(apply_btn)
+        self.apply_btn.clicked.connect(self.apply_changes)
+        self.apply_btn.setEnabled(False)
+        layout.addWidget(self.apply_btn)
         
         # Кнопка отката
-        undo_btn = QPushButton("↩️ Откатить последнюю операцию")
-        undo_btn.setStyleSheet(button_style + """
+        self.undo_btn = QPushButton("↩️ Откатить последнюю операцию")
+        self.undo_btn.setStyleSheet(button_style + """
             QPushButton {
                 background-color: #e74c3c;
                 color: white;
@@ -757,13 +874,18 @@ class RenamerWindow(QMainWindow):
             QPushButton:hover {
                 background-color: #c0392b;
             }
+            QPushButton:disabled {
+                background-color: #95a5a6;
+                color: #7f8c8d;
+            }
         """)
-        undo_btn.clicked.connect(self.dummy_undo)
-        layout.addWidget(undo_btn)
+        self.undo_btn.clicked.connect(self.undo_changes)
+        self.undo_btn.setEnabled(False)
+        layout.addWidget(self.undo_btn)
         
         # Кнопка очистки
-        clear_btn = QPushButton("🗑️ Очистить правила")
-        clear_btn.setStyleSheet(button_style + """
+        self.clear_btn = QPushButton("🗑️ Очистить правила")
+        self.clear_btn.setStyleSheet(button_style + """
             QPushButton {
                 background-color: #f39c12;
                 color: white;
@@ -772,14 +894,15 @@ class RenamerWindow(QMainWindow):
                 background-color: #d68910;
             }
         """)
-        clear_btn.clicked.connect(self.dummy_clear)
-        layout.addWidget(clear_btn)
+        self.clear_btn.clicked.connect(self.clear_rules)
+        layout.addWidget(self.clear_btn)
         
-        layout.addStretch()
+        layout.addStretch(1)
+        
         return widget
         
     def create_status_bar(self):
-        #Создание статусной панели"
+        """Создание статусной панели"""
         widget = QWidget()
         layout = QHBoxLayout(widget)
         
@@ -834,51 +957,436 @@ class RenamerWindow(QMainWindow):
         
         return widget
         
-    def dummy_browse(self):
-        #Заглушка для кнопки обзора
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку")
+    def browse_folder(self):
+        # Выбор папки
+        folder = QFileDialog.getExistingDirectory(
+            self, 
+            "Выберите папку",
+            "",
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
         if folder:
             self.folder_path_edit.setText(folder)
+            self.current_folder = folder
             self.status_label.setText(f"Выбрана папка: {os.path.basename(folder)}")
             
-    def dummy_load(self):
-        #Заглушка для загрузки файлов
-        if not self.folder_path_edit.text():
+    def load_files(self):
+        # Загрузка файлов из папки с фильтрацией и сортировкой
+        folder_path = self.folder_path_edit.text()
+        
+        if not folder_path:
             QMessageBox.warning(self, "Внимание", "Сначала выберите папку!")
             return
             
-        self.file_counter.setText("Файлов: 8")
-        self.status_label.setText("Загружено 8 файлов для обработки")
-        
-    def dummy_preview(self):
-        #Заглушка для предпросмотра
-        self.progress_bar.setValue(50)
-        self.status_label.setText("Предпросмотр выполнен. Проверьте изменения в таблице.")
-        
-    def dummy_apply(self):
-        #Заглушка для применения
-        reply = QMessageBox.question(self, "Подтверждение",
-                                   "Вы уверены, что хотите переименовать 8 файлов?",
-                                   QMessageBox.Yes | QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            self.progress_bar.setValue(100)
-            self.status_label.setText("Переименование успешно выполнено!")
-            QMessageBox.information(self, "Успех", "Файлы успешно переименованы!")
+        if not os.path.exists(folder_path):
+            QMessageBox.warning(self, "Ошибка", "Указанная папка не существует!")
+            return
             
-    def dummy_undo(self):
-        #Заглушка для отката
-        reply = QMessageBox.question(self, "Откат",
-                                   "Откатить последнюю операцию переименования?",
-                                   QMessageBox.Yes | QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            self.status_label.setText("Последняя операция отменена")
+        try:
+            # Получаем список всех файлов
+            all_files = self.file_manager.get_files_from_folder(folder_path)
             
-    def dummy_clear(self):
-        #Заглушка для очистки
-        self.folder_path_edit.clear()
-        self.file_table.setRowCount(0)
+            if not all_files:
+                QMessageBox.information(self, "Информация", "В выбранной папке нет файлов")
+                return
+            
+            # Применяем фильтрацию по расширениям
+            extensions = self.filter_extensions.text()
+            filtered_files = self.file_manager.filter_files_by_extension(all_files, extensions)
+            
+            # Применяем фильтрацию по размеру
+            min_size = self.min_size.value()
+            filtered_files = self.file_manager.filter_files_by_size(filtered_files, folder_path, min_size)
+            
+            if not filtered_files:
+                QMessageBox.warning(self, "Внимание", 
+                                  "Нет файлов, соответствующих фильтрам. Измените параметры фильтрации.")
+                return
+            
+            # Применяем сортировку
+            sort_by = 'name'
+            if self.sort_by_date.isChecked():
+                sort_by = 'date'
+            elif self.sort_by_size.isChecked():
+                sort_by = 'size'
+            
+            ascending = self.sort_asc.isChecked()
+            sorted_files = self.file_manager.sort_files(filtered_files, folder_path, sort_by, ascending)
+            
+            # Сохраняем текущий список файлов
+            self.current_files = sorted_files
+            self.current_folder = folder_path
+            
+            # Заполняем таблицу
+            self.file_table.setRowCount(len(sorted_files))
+            
+            for i, filename in enumerate(sorted_files):
+                # Номер
+                num_item = QTableWidgetItem(str(i + 1))
+                num_item.setTextAlignment(Qt.AlignCenter)
+                num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 0, num_item)
+                
+                # Текущее имя
+                old_item = QTableWidgetItem(filename)
+                old_item.setFlags(old_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 1, old_item)
+                
+                # Новое имя (пока такое же)
+                new_item = QTableWidgetItem(filename)
+                new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 2, new_item)
+                
+                # Статус
+                status_item = QTableWidgetItem("⏳ Ожидание")
+                status_item.setTextAlignment(Qt.AlignCenter)
+                status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+                status_item.setBackground(QColor("#fff9e6"))
+                status_item.setForeground(QColor("#f39c12"))
+                self.file_table.setItem(i, 3, status_item)
+            
+            # Обновляем счетчик и статус
+            file_count = len(sorted_files)
+            self.file_counter.setText(f"Файлов: {file_count}")
+            
+            # Включаем кнопку предпросмотра
+            self.preview_btn.setEnabled(True)
+            self.apply_btn.setEnabled(False)
+            self.undo_btn.setEnabled(False)
+            
+            self.status_label.setText(f"Загружено {file_count} файлов")
+            self.progress_bar.setValue(0)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файлы:\n{str(e)}")
+            self.status_label.setText("Ошибка при загрузке файлов")
+            
+    def collect_rules(self) -> Dict[str, Any]:
+        # Сбор всех правил из интерфейса
+        rules = {
+            # Замена текста
+            'enable_replace': self.enable_replace.isChecked(),
+            'replace_from': self.replace_from.text(),
+            'replace_to': self.replace_to.text(),
+            'case_sensitive': self.case_sensitive.isChecked(),
+            'replace_all': self.replace_all.isChecked(),
+            
+            # Префикс/суффикс
+            'enable_prefix_suffix': self.enable_prefix_suffix.isChecked(),
+            'prefix': self.prefix_text.text(),
+            'suffix': self.suffix_text.text(),
+            'suffix_before_ext': self.suffix_before_ext.isChecked(),
+            
+            # Нумерация
+            'enable_numbering': self.enable_numbering.isChecked(),
+            'start_number': self.start_number.value(),
+            'digits_count': self.digits_count.value(),
+            'number_separator': self.number_separator.text(),
+            'number_position': 'prefix' if self.number_prefix.isChecked() else 'suffix',
+            
+            # Регулярные выражения
+            'enable_regex': self.enable_regex.isChecked(),
+            'regex_pattern': self.regex_pattern.text(),
+            'regex_replacement': self.regex_replacement.text(),
+            'regex_ignore_case': self.regex_ignore_case.isChecked(),
+            'regex_dotall': self.regex_dotall.isChecked(),
+            
+            # EXIF
+            'enable_exif': self.enable_exif.isChecked(),
+            'date_format': self.date_format.currentText(),
+            'exif_position': 'prefix' if self.date_prefix.isChecked() else 'suffix',
+            'exif_separator': self.exif_separator.text(),
+            'use_camera_model': self.use_camera_model.isChecked(),
+            'use_exposure': self.use_exposure.isChecked(),
+            'use_gps': self.use_gps.isChecked(),
+            
+            # Дополнительно
+            'lowercase_ext': self.lowercase_ext.isChecked(),
+            'remove_spaces': self.remove_spaces.isChecked(),
+            'keep_original': self.keep_original.isChecked(),
+        }
+        
+        return rules
+        
+    def preview_changes(self):
+        # Предпросмотр изменений на основе правил
+        if not self.current_files or not self.current_folder:
+            QMessageBox.warning(self, "Внимание", "Сначала загрузите файлы!")
+            return
+        
+        # Блокируем кнопки во время обработки
+        self.preview_btn.setEnabled(False)
+        self.apply_btn.setEnabled(False)
+        self.status_label.setText("Выполняется предпросмотр...")
         self.progress_bar.setValue(0)
-        self.file_counter.setText("Файлов: 0")
-        self.status_label.setText("Все правила очищены")
+        
+        # Собираем правила
+        rules = self.collect_rules()
+        
+        # Запускаем воркер в отдельном потоке
+        self.worker = PreviewWorker(self.current_files, rules, self.current_folder)
+        self.worker.preview_finished.connect(self.on_preview_finished)
+        self.worker.progress_updated.connect(self.progress_bar.setValue)
+        self.worker.error_occurred.connect(self.on_preview_error)
+        self.worker.start()
+        
+    def on_preview_finished(self, results: Dict[str, str]):
+        # Обработка завершения предпросмотра
+        self.preview_results = results
+        
+        # Обновляем таблицу
+        for i in range(self.file_table.rowCount()):
+            current_name = self.file_table.item(i, 1).text()
+            new_name = results.get(current_name, current_name)
+            
+            # Обновляем новое имя
+            new_item = QTableWidgetItem(new_name)
+            new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
+            self.file_table.setItem(i, 2, new_item)
+            
+            # Обновляем статус
+            if new_name != current_name:
+                status_item = self.file_table.item(i, 3)
+                status_item.setText("✅ Изменено")
+                status_item.setBackground(QColor("#d5f4e6"))
+                status_item.setForeground(QColor("#27ae60"))
+        
+        # Разблокируем кнопки
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(True)
+        self.status_label.setText("Предпросмотр выполнен")
+        self.progress_bar.setValue(100)
+        
+    def on_preview_error(self, error_msg: str):
+        # Обработка ошибки предпросмотра
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(False)
+        self.status_label.setText("Ошибка при предпросмотре")
+        QMessageBox.critical(self, "Ошибка", f"Ошибка при предпросмотре:\n{error_msg}")
+            
+    def apply_changes(self):
+        # Применение изменений (переименование файлов)
+        if not self.preview_results:
+            QMessageBox.warning(self, "Внимание", "Сначала выполните предпросмотр!")
+            return
+        
+        folder_path = self.current_folder
+        if not folder_path or not os.path.exists(folder_path):
+            QMessageBox.warning(self, "Ошибка", "Папка не существует!")
+            return
+        
+        # Подсчитываем сколько файлов будет изменено
+        changes = []
+        changed_files = []
+        
+        for i in range(self.file_table.rowCount()):
+            current_name = self.file_table.item(i, 1).text()
+            new_name = self.file_table.item(i, 2).text()
+            
+            if current_name != new_name:
+                changes.append({'old': current_name, 'new': new_name})
+                changed_files.append(current_name)
+        
+        if not changes:
+            QMessageBox.information(self, "Информация", "Нет изменений для применения")
+            return
+        
+        # Подтверждение
+        reply = QMessageBox.question(
+            self, 
+            "Подтверждение",
+            f"Вы уверены, что хотите переименовать {len(changes)} файлов?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Создаем резервную копию если нужно
+        keep_original = self.keep_original.isChecked()
+        if keep_original:
+            backup_path = self.undo_manager.create_backup(folder_path, changed_files)
+            if backup_path:
+                self.status_label.setText(f"Создана резервная копия в {backup_path}")
+        
+        # Выполняем переименование
+        success_count = 0
+        error_count = 0
+        failed_files = []
+        
+        for change in changes:
+            old_path = os.path.join(folder_path, change['old'])
+            new_path = os.path.join(folder_path, change['new'])
+            
+            # Проверяем валидность нового имени
+            is_valid, error_msg = self.file_manager.validate_file_name(change['new'])
+            if not is_valid:
+                error_count += 1
+                failed_files.append(f"{change['old']}: {error_msg}")
+                continue
+            
+            # Проверяем, не существует ли уже файл с таким именем
+            if os.path.exists(new_path) and new_path != old_path:
+                error_count += 1
+                failed_files.append(f"{change['old']}: файл '{change['new']}' уже существует")
+                continue
+            
+            # Переименовываем файл
+            success = self.file_manager.rename_file(old_path, change['new'], keep_original)
+            
+            if success:
+                success_count += 1
+                
+                # Обновляем текущее имя в таблице
+                for i in range(self.file_table.rowCount()):
+                    if self.file_table.item(i, 1).text() == change['old']:
+                        self.file_table.item(i, 1).setText(change['new'])
+                        
+                        # Обновляем статус
+                        status_item = self.file_table.item(i, 3)
+                        status_item.setText("✅ Применено")
+                        status_item.setBackground(QColor("#a3e4d7"))
+                        break
+            else:
+                error_count += 1
+                failed_files.append(f"{change['old']}: ошибка переименования")
+        
+        # Добавляем операцию в историю
+        if success_count > 0:
+            self.undo_manager.add_operation(folder_path, changes)
+            self.undo_btn.setEnabled(True)
+        
+        # Показываем результат
+        self.progress_bar.setValue(100)
+        
+        if success_count > 0:
+            self.status_label.setText(f"Успешно переименовано {success_count} файлов")
+            
+            if error_count > 0:
+                QMessageBox.warning(
+                    self, 
+                    "Внимание", 
+                    f"Успешно переименовано {success_count} файлов\n"
+                    f"Не удалось переименовать {error_count} файлов\n\n"
+                    "Подробности:\n" + "\n".join(failed_files[:10]) + 
+                    ("\n..." if len(failed_files) > 10 else "")
+                )
+            else:
+                QMessageBox.information(
+                    self, 
+                    "Успех", 
+                    f"Успешно переименовано {success_count} файлов"
+                )
+        else:
+            self.status_label.setText("Не удалось переименовать файлы")
+            QMessageBox.critical(
+                self, 
+                "Ошибка", 
+                f"Не удалось переименовать ни один файл:\n\n" + 
+                "\n".join(failed_files[:10]) + 
+                ("\n..." if len(failed_files) > 10 else "")
+            )
+            
+    def undo_changes(self):
+        # Откат последней операции
+        # Проверяем, есть ли операции для отката
+        last_op = self.undo_manager.get_last_operation()
+        if not last_op:
+            QMessageBox.information(self, "Информация", "Нет операций для отката")
+            return
+        
+        # Подтверждение
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение отката",
+            f"Откатить последнюю операцию переименования ({len(last_op.changes)} файлов)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Выполняем откат
+        success = self.undo_manager.undo_last_operation()
+        
+        if success:
+            # Обновляем интерфейс
+            self.load_files()  # Перезагружаем файлы
+            self.status_label.setText("Последняя операция отменена")
+            self.undo_btn.setEnabled(self.undo_manager.get_last_operation() is not None)
+            QMessageBox.information(self, "Успех", "Операция успешно отменена")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Не удалось отменить операцию")
+            
+    def clear_rules(self):
+        # Очистка правил и сброс предпросмотра
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Очистить все правила и сбросить предпросмотр?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Сбрасываем все чекбоксы включения
+        self.enable_replace.setChecked(True)
+        self.enable_prefix_suffix.setChecked(True)
+        self.enable_numbering.setChecked(True)
+        self.enable_regex.setChecked(True)
+        self.enable_exif.setChecked(True)
+        
+        # Сбрасываем поля ввода
+        self.replace_from.clear()
+        self.replace_to.clear()
+        self.case_sensitive.setChecked(False)
+        self.replace_all.setChecked(True)
+        
+        self.prefix_text.clear()
+        self.suffix_text.clear()
+        self.suffix_before_ext.setChecked(True)
+        
+        self.start_number.setValue(1)
+        self.digits_count.setValue(3)
+        self.number_separator.setText("_")
+        self.number_suffix.setChecked(True)
+        
+        self.regex_pattern.clear()
+        self.regex_replacement.clear()
+        self.regex_ignore_case.setChecked(False)
+        self.regex_dotall.setChecked(False)
+        
+        self.date_format.setCurrentIndex(0)
+        self.date_prefix.setChecked(True)
+        self.exif_separator.setText("_")
+        self.use_camera_model.setChecked(False)
+        self.use_exposure.setChecked(False)
+        self.use_gps.setChecked(False)
+        
+        self.lowercase_ext.setChecked(True)
+        self.remove_spaces.setChecked(False)
+        self.keep_original.setChecked(False)
+        self.filter_extensions.clear()
+        self.min_size.setValue(0)
+        self.sort_by_name.setChecked(True)
+        self.sort_asc.setChecked(True)
+        
+        # Сбрасываем таблицу к исходным именам (если есть файлы)
+        if self.current_files:
+            for i, filename in enumerate(self.current_files):
+                if i < self.file_table.rowCount():
+                    self.file_table.item(i, 2).setText(filename)
+                    
+                    status_item = self.file_table.item(i, 3)
+                    status_item.setText("⏳ Ожидание")
+                    status_item.setBackground(QColor("#fff9e6"))
+                    status_item.setForeground(QColor("#f39c12"))
+        
+        self.preview_results.clear()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Все правила очищены, предпросмотр сброшен")
+        self.apply_btn.setEnabled(False)
