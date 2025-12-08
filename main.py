@@ -7,7 +7,7 @@ from renamer_gui import RenamerWindow
 def main():
     """Точка входа в приложение"""
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')  # Современный стиль
+    app.setStyle('Fusion') 
     
     window = RenamerWindow()
     window.show()
@@ -15,4 +15,5 @@ def main():
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
+
     main()
