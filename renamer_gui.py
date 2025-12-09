@@ -17,7 +17,7 @@ from PyQt5.QtGui import QFont, QIcon, QColor
 try:
     from file_manager import FileManager
     from rules_engine import RulesEngine
-    from exif_processor import EXIFProcessor
+   # from exif_processor import EXIFProcessor
     from undo_manager import UndoManager
 except ImportError as e:
     print(f"Ошибка импорта модулей: {e}")
@@ -32,11 +32,14 @@ class PreviewWorker(QThread):
     progress_updated = pyqtSignal(int)
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, files: List[str], rules: Dict[str, Any], folder_path: str):
+    def __init__(self, files: List[str], rules: Dict[str, Any], folder_path: str, 
+                 sort_by: str = 'name', ascending: bool = True):
         super().__init__()
         self.files = files
         self.rules = rules
         self.folder_path = folder_path
+        self.sort_by = sort_by
+        self.ascending = ascending
         
     def run(self):
         # Выполнение предпросмотра в фоновом потоке
@@ -44,18 +47,19 @@ class PreviewWorker(QThread):
             results = {}
             total_files = len(self.files)
             
+            # Создаем список пар (старое имя, индекс) для правильной нумерации
             for i, file_name in enumerate(self.files):
                 # Обновляем прогресс
                 progress = int((i + 1) / total_files * 100)
                 self.progress_updated.emit(progress)
                 
-                # Применяем правила
+                # Применяем правила - передаем индекс i для нумерации
                 new_name = RulesEngine.generate_new_name(file_name, i, self.rules)
                 
                 # Применяем EXIF данные если нужно
                 if self.rules.get('enable_exif', False):
                     file_path = os.path.join(self.folder_path, file_name)
-                    new_name = EXIFProcessor.add_exif_to_filename(new_name, file_path, self.rules)
+                #    new_name = EXIFProcessor.add_exif_to_filename(new_name, file_path, self.rules)
                 
                 results[file_name] = new_name
             
@@ -73,7 +77,21 @@ class RenamerWindow(QMainWindow):
         self.current_files = []
         self.current_folder = ""
         self.preview_results = {}
+        # Атрибуты сортировки
+        self.current_sort_by = 'name'
+        self.current_ascending = True
+        self.original_files_order = []  # Сохраняем исходный порядок файлов
         self.setup_ui()
+
+        QTimer.singleShot(0, self.initialize_disabled_fields)
+    
+    def initialize_disabled_fields(self):
+        """Инициализация всех полей как отключенных при запуске"""
+        self.toggle_replace_fields()
+        self.toggle_prefix_suffix_fields()
+        self.toggle_numbering_fields()
+        self.toggle_regex_fields()
+        self.toggle_exif_fields()
         
     def setup_ui(self):
         #Настройка пользовательского интерфейса
@@ -226,7 +244,7 @@ class RenamerWindow(QMainWindow):
         self.file_table.setColumnCount(4)
         self.file_table.setHorizontalHeaderLabels(["№", "Текущее имя", "Новое имя", "Статус"])
         
-        # Настройка таблицы
+        # Настройка таблица
         self.file_table.setStyleSheet("""
             QTableWidget {
                 font-size: 11px;
@@ -331,7 +349,7 @@ class RenamerWindow(QMainWindow):
         
         # Чекбокс включения замены текста
         self.enable_replace = QCheckBox("Включить замену текста")
-        self.enable_replace.setChecked(True)
+        self.enable_replace.setChecked(False)
         self.enable_replace.stateChanged.connect(self.toggle_replace_fields)
         form.addRow(self.enable_replace)
         
@@ -399,7 +417,7 @@ class RenamerWindow(QMainWindow):
         
         # Чекбокс включения префикса/суффикса
         self.enable_prefix_suffix = QCheckBox("Включить префикс/суффикс")
-        self.enable_prefix_suffix.setChecked(True)
+        self.enable_prefix_suffix.setChecked(False)
         self.enable_prefix_suffix.stateChanged.connect(self.toggle_prefix_suffix_fields)
         form.addRow(self.enable_prefix_suffix)
         
@@ -471,7 +489,7 @@ class RenamerWindow(QMainWindow):
         
         # Чекбокс включения нумерации
         self.enable_numbering = QCheckBox("Включить нумерацию")
-        self.enable_numbering.setChecked(True)
+        self.enable_numbering.setChecked(False)
         self.enable_numbering.stateChanged.connect(self.toggle_numbering_fields)
         form.addRow(self.enable_numbering)
         
@@ -558,7 +576,7 @@ class RenamerWindow(QMainWindow):
         
         # Чекбокс включения регулярных выражений
         self.enable_regex = QCheckBox("Включить регулярные выражения")
-        self.enable_regex.setChecked(True)
+        self.enable_regex.setChecked(False)
         self.enable_regex.stateChanged.connect(self.toggle_regex_fields)
         form.addRow(self.enable_regex)
         
@@ -636,7 +654,7 @@ class RenamerWindow(QMainWindow):
         
         # Включить EXIF
         self.enable_exif = QCheckBox("Включить EXIF данные")
-        self.enable_exif.setChecked(True)
+        self.enable_exif.setChecked(False)
         self.enable_exif.stateChanged.connect(self.toggle_exif_fields)
         form.addRow(self.enable_exif)
         
@@ -766,7 +784,7 @@ class RenamerWindow(QMainWindow):
     
         filter_group.setLayout(filter_layout)
     
-        # Группа 3: Сортировка
+        # Группа 3: Сортировка - ИСПРАВЛЕННАЯ ВЕРСИЯ
         sort_group = QGroupBox("Сортировка файлов перед переименованием")
         sort_group.setStyleSheet("""
             QGroupBox {
@@ -778,25 +796,47 @@ class RenamerWindow(QMainWindow):
             }
         """)
     
-        sort_layout = QVBoxLayout()
-
+        # Создаем группу для радиокнопок критерия сортировки
+        sort_criteria_group = QGroupBox("Критерий сортировки")
+        sort_criteria_layout = QVBoxLayout()
+        
         self.sort_by_name = QRadioButton("По имени")
         self.sort_by_name.setChecked(True)
         self.sort_by_date = QRadioButton("По дате создания")
         self.sort_by_size = QRadioButton("По размеру")
+        
+        # Создаем ButtonGroup для связывания радиокнопок критерия
+        self.criteria_button_group = QButtonGroup()
+        self.criteria_button_group.addButton(self.sort_by_name, 1)
+        self.criteria_button_group.addButton(self.sort_by_date, 2)
+        self.criteria_button_group.addButton(self.sort_by_size, 3)
+        
+        sort_criteria_layout.addWidget(self.sort_by_name)
+        sort_criteria_layout.addWidget(self.sort_by_date)
+        sort_criteria_layout.addWidget(self.sort_by_size)
+        sort_criteria_group.setLayout(sort_criteria_layout)
     
-        sort_order_layout = QHBoxLayout()
+        # Создаем группу для радиокнопок направления сортировки
+        sort_order_group = QGroupBox("Порядок сортировки")
+        sort_order_layout = QVBoxLayout()
+        
         self.sort_asc = QRadioButton("По возрастанию")
         self.sort_asc.setChecked(True)
         self.sort_desc = QRadioButton("По убыванию")
-    
+        
+        # Создаем ButtonGroup для связывания радиокнопок направления
+        self.order_button_group = QButtonGroup()
+        self.order_button_group.addButton(self.sort_asc, 1)
+        self.order_button_group.addButton(self.sort_desc, 2)
+        
         sort_order_layout.addWidget(self.sort_asc)
         sort_order_layout.addWidget(self.sort_desc)
+        sort_order_group.setLayout(sort_order_layout)
     
-        sort_layout.addWidget(self.sort_by_name)
-        sort_layout.addWidget(self.sort_by_date)
-        sort_layout.addWidget(self.sort_by_size)
-        sort_layout.addLayout(sort_order_layout)
+        # Добавляем обе группы в основную группу сортировки
+        sort_layout = QHBoxLayout()
+        sort_layout.addWidget(sort_criteria_group, 1)
+        sort_layout.addWidget(sort_order_group, 1)
         sort_group.setLayout(sort_layout)
     
         layout.addWidget(ext_group)
@@ -844,6 +884,25 @@ class RenamerWindow(QMainWindow):
         self.preview_btn.clicked.connect(self.preview_changes)
         self.preview_btn.setEnabled(False)
         layout.addWidget(self.preview_btn)
+        
+        # Кнопка сортировки
+        self.sort_btn = QPushButton("🔄 Сортировать")
+        self.sort_btn.setStyleSheet(button_style + """
+            QPushButton {
+                background-color: #9b59b6;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #8e44ad;
+            }
+            QPushButton:disabled {
+                background-color: #95a5a6;
+                color: #7f8c8d;
+            }
+        """)
+        self.sort_btn.clicked.connect(self.resort_files)
+        self.sort_btn.setEnabled(False)
+        layout.addWidget(self.sort_btn)
         
         # Кнопка применения
         self.apply_btn = QPushButton("✅ Применить переименование")
@@ -990,6 +1049,9 @@ class RenamerWindow(QMainWindow):
                 QMessageBox.information(self, "Информация", "В выбранной папке нет файлов")
                 return
             
+            # Сохраняем исходный порядок файлов (без сортировки)
+            self.original_files_order = all_files.copy()
+            
             # Применяем фильтрацию по расширениям
             extensions = self.filter_extensions.text()
             filtered_files = self.file_manager.filter_files_by_extension(all_files, extensions)
@@ -1003,14 +1065,25 @@ class RenamerWindow(QMainWindow):
                                   "Нет файлов, соответствующих фильтрам. Измените параметры фильтрации.")
                 return
             
-            # Применяем сортировку
-            sort_by = 'name'
-            if self.sort_by_date.isChecked():
+            # Применяем сортировку - используем сохраненные параметры сортировки
+            sort_by = self.current_sort_by
+            ascending = self.current_ascending
+            
+            # Получаем актуальные настройки из интерфейса
+            if self.sort_by_name.isChecked():
+                sort_by = 'name'
+            elif self.sort_by_date.isChecked():
                 sort_by = 'date'
             elif self.sort_by_size.isChecked():
                 sort_by = 'size'
             
             ascending = self.sort_asc.isChecked()
+            
+            # Обновляем сохраненные параметры
+            self.current_sort_by = sort_by
+            self.current_ascending = ascending
+            
+            # СОРТИРУЕМ файлы
             sorted_files = self.file_manager.sort_files(filtered_files, folder_path, sort_by, ascending)
             
             # Сохраняем текущий список файлов
@@ -1051,15 +1124,79 @@ class RenamerWindow(QMainWindow):
             
             # Включаем кнопку предпросмотра
             self.preview_btn.setEnabled(True)
+            self.sort_btn.setEnabled(True)
             self.apply_btn.setEnabled(False)
             self.undo_btn.setEnabled(False)
             
-            self.status_label.setText(f"Загружено {file_count} файлов")
+            self.status_label.setText(f"Загружено {file_count} файлов, отсортировано по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
             self.progress_bar.setValue(0)
             
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файлы:\n{str(e)}")
             self.status_label.setText("Ошибка при загрузке файлов")
+            
+    def resort_files(self):
+        """Пересортировать файлы с текущими параметрами"""
+        if not self.current_folder or not self.current_files:
+            QMessageBox.warning(self, "Внимание", "Сначала загрузите файлы!")
+            return
+        
+        try:
+            # Получаем актуальные настройки сортировки из интерфейса
+            sort_by = 'name'
+            if self.sort_by_date.isChecked():
+                sort_by = 'date'
+            elif self.sort_by_size.isChecked():
+                sort_by = 'size'
+            
+            ascending = self.sort_asc.isChecked()
+            
+            # Обновляем сохраненные параметры
+            self.current_sort_by = sort_by
+            self.current_ascending = ascending
+            
+            # Сортируем текущий список файлов
+            sorted_files = self.file_manager.sort_files(self.current_files, self.current_folder, sort_by, ascending)
+            
+            if sorted_files != self.current_files:
+                self.current_files = sorted_files
+                
+                # Обновляем таблицу
+                for i, filename in enumerate(sorted_files):
+                    if i < self.file_table.rowCount():
+                        # Обновляем номер
+                        num_item = QTableWidgetItem(str(i + 1))
+                        num_item.setTextAlignment(Qt.AlignCenter)
+                        num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
+                        self.file_table.setItem(i, 0, num_item)
+                        
+                        # Текущее имя
+                        old_item = QTableWidgetItem(filename)
+                        old_item.setFlags(old_item.flags() & ~Qt.ItemIsEditable)
+                        self.file_table.setItem(i, 1, old_item)
+                        
+                        # Сбрасываем новое имя
+                        new_item = QTableWidgetItem(filename)
+                        new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
+                        self.file_table.setItem(i, 2, new_item)
+                        
+                        # Сбрасываем статус
+                        status_item = QTableWidgetItem("⏳ Ожидание")
+                        status_item.setTextAlignment(Qt.AlignCenter)
+                        status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+                        status_item.setBackground(QColor("#fff9e6"))
+                        status_item.setForeground(QColor("#f39c12"))
+                        self.file_table.setItem(i, 3, status_item)
+                
+                self.status_label.setText(f"Файлы отсортированы по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
+                self.preview_results.clear()  # Сбрасываем предпросмотр
+                self.apply_btn.setEnabled(False)  # Отключаем кнопку применения
+                
+                QMessageBox.information(self, "Успех", 
+                                      f"Файлы отсортированы по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при сортировке:\n{str(e)}")
             
     def collect_rules(self) -> Dict[str, Any]:
         # Сбор всех правил из интерфейса
@@ -1104,6 +1241,10 @@ class RenamerWindow(QMainWindow):
             'lowercase_ext': self.lowercase_ext.isChecked(),
             'remove_spaces': self.remove_spaces.isChecked(),
             'keep_original': self.keep_original.isChecked(),
+            
+            # Параметры сортировки (для правильного порядка применения)
+            'sort_by': self.current_sort_by,
+            'ascending': self.current_ascending,
         }
         
         return rules
@@ -1116,6 +1257,7 @@ class RenamerWindow(QMainWindow):
         
         # Блокируем кнопки во время обработки
         self.preview_btn.setEnabled(False)
+        self.sort_btn.setEnabled(False)
         self.apply_btn.setEnabled(False)
         self.status_label.setText("Выполняется предпросмотр...")
         self.progress_bar.setValue(0)
@@ -1123,8 +1265,12 @@ class RenamerWindow(QMainWindow):
         # Собираем правила
         rules = self.collect_rules()
         
+        # Получаем параметры сортировки
+        sort_by = self.current_sort_by
+        ascending = self.current_ascending
+        
         # Запускаем воркер в отдельном потоке
-        self.worker = PreviewWorker(self.current_files, rules, self.current_folder)
+        self.worker = PreviewWorker(self.current_files, rules, self.current_folder, sort_by, ascending)
         self.worker.preview_finished.connect(self.on_preview_finished)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.error_occurred.connect(self.on_preview_error)
@@ -1150,9 +1296,15 @@ class RenamerWindow(QMainWindow):
                 status_item.setText("✅ Изменено")
                 status_item.setBackground(QColor("#d5f4e6"))
                 status_item.setForeground(QColor("#27ae60"))
+            else:
+                status_item = self.file_table.item(i, 3)
+                status_item.setText("⏳ Ожидание")
+                status_item.setBackground(QColor("#fff9e6"))
+                status_item.setForeground(QColor("#f39c12"))
         
         # Разблокируем кнопки
         self.preview_btn.setEnabled(True)
+        self.sort_btn.setEnabled(True)
         self.apply_btn.setEnabled(True)
         self.status_label.setText("Предпросмотр выполнен")
         self.progress_bar.setValue(100)
@@ -1160,6 +1312,7 @@ class RenamerWindow(QMainWindow):
     def on_preview_error(self, error_msg: str):
         # Обработка ошибки предпросмотра
         self.preview_btn.setEnabled(True)
+        self.sort_btn.setEnabled(True)
         self.apply_btn.setEnabled(False)
         self.status_label.setText("Ошибка при предпросмотре")
         QMessageBox.critical(self, "Ошибка", f"Ошибка при предпросмотре:\n{error_msg}")
@@ -1179,9 +1332,10 @@ class RenamerWindow(QMainWindow):
         changes = []
         changed_files = []
         
+        # Используем preview_results для получения новых имен
         for i in range(self.file_table.rowCount()):
             current_name = self.file_table.item(i, 1).text()
-            new_name = self.file_table.item(i, 2).text()
+            new_name = self.preview_results.get(current_name, current_name)
             
             if current_name != new_name:
                 changes.append({'old': current_name, 'new': new_name})
@@ -1237,25 +1391,18 @@ class RenamerWindow(QMainWindow):
             
             if success:
                 success_count += 1
-                
-                # Обновляем текущее имя в таблице
-                for i in range(self.file_table.rowCount()):
-                    if self.file_table.item(i, 1).text() == change['old']:
-                        self.file_table.item(i, 1).setText(change['new'])
-                        
-                        # Обновляем статус
-                        status_item = self.file_table.item(i, 3)
-                        status_item.setText("✅ Применено")
-                        status_item.setBackground(QColor("#a3e4d7"))
-                        break
             else:
                 error_count += 1
                 failed_files.append(f"{change['old']}: ошибка переименования")
         
-        # Добавляем операцию в историю
+        # После переименования перезагружаем файлы
         if success_count > 0:
+            # Добавляем операцию в историю
             self.undo_manager.add_operation(folder_path, changes)
             self.undo_btn.setEnabled(True)
+            
+            # Перезагружаем файлы для обновления списка
+            self.load_files()
         
         # Показываем результат
         self.progress_bar.setValue(100)
@@ -1334,11 +1481,11 @@ class RenamerWindow(QMainWindow):
             return
         
         # Сбрасываем все чекбоксы включения
-        self.enable_replace.setChecked(True)
-        self.enable_prefix_suffix.setChecked(True)
-        self.enable_numbering.setChecked(True)
-        self.enable_regex.setChecked(True)
-        self.enable_exif.setChecked(True)
+        self.enable_replace.setChecked(False)
+        self.enable_prefix_suffix.setChecked(False)
+        self.enable_numbering.setChecked(False)
+        self.enable_regex.setChecked(False)
+        self.enable_exif.setChecked(False)
         
         # Сбрасываем поля ввода
         self.replace_from.clear()
@@ -1390,3 +1537,4 @@ class RenamerWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Все правила очищены, предпросмотр сброшен")
         self.apply_btn.setEnabled(False)
+        self.sort_btn.setEnabled(len(self.current_files) > 0)
