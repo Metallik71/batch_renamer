@@ -102,17 +102,17 @@ class RulesEngine:
     
     @staticmethod
     def apply_extension_processing(file_name: str, rules: Dict[str, Any]) -> str:
-        # Обработка расширений файлов
+        # Обработка расширений файлов и удаление пробелов
         result = file_name
+        
+        # Удаление пробелов
+        if rules.get('remove_spaces', False):
+            result = result.replace(' ', '')
         
         # Приведение расширения к нижнему регистру
         if rules.get('lowercase_ext', True):
             name, ext = os.path.splitext(result)
             result = name + ext.lower()
-        
-        # Удаление пробелов
-        if rules.get('remove_spaces', False):
-            result = result.replace(' ', '')
         
         return result
     
@@ -132,8 +132,9 @@ class RulesEngine:
         # Применяем правила в определенном порядке
         result = file_name
         
-        # 1. Обработка расширений (делается первой)
-        result = RulesEngine.apply_extension_processing(result, rules)
+        # 1. Удаление пробелов (самое первое)
+        if rules.get('remove_spaces', False):
+            result = result.replace(' ', '')
         
         # 2. Замена текста
         result = RulesEngine.apply_text_replace(result, rules)
@@ -144,9 +145,65 @@ class RulesEngine:
         # 4. Префикс/суффикс (до нумерации)
         result = RulesEngine.apply_prefix_suffix(result, rules)
         
-        # 5. Нумерация (обычно делается последней)
+        # 5. Нумерация
         result = RulesEngine.apply_numbering(result, index, rules)
         
+        # 6. Приведение расширения к нижнему регистру (самое последнее)
+        if rules.get('lowercase_ext', True):
+            name, ext = os.path.splitext(result)
+            result = name + ext.lower()
+        
+        return result
+    
+    @staticmethod
+    def debug_generate_new_name(file_name: str, index: int, rules: Dict[str, Any]) -> str:
+        """
+        Отладочная версия для отслеживания шагов
+        """
+        print(f"\n--- Обработка файла: {file_name}, индекс: {index} ---")
+        
+        result = file_name
+        print(f"Исходное имя: {result}")
+        
+        # Удаление пробелов
+        if rules.get('remove_spaces', False):
+            result = result.replace(' ', '')
+            print(f"После удаления пробелов: {result}")
+        
+        # Замена текста
+        if rules.get('enable_replace', False):
+            old_result = result
+            result = RulesEngine.apply_text_replace(result, rules)
+            if result != old_result:
+                print(f"После замены текста: {result}")
+        
+        # Регулярные выражения
+        if rules.get('enable_regex', False):
+            old_result = result
+            result = RulesEngine.apply_regex(result, rules)
+            if result != old_result:
+                print(f"После регулярных выражений: {result}")
+        
+        # Префикс/суффикс
+        if rules.get('enable_prefix_suffix', False):
+            old_result = result
+            result = RulesEngine.apply_prefix_suffix(result, rules)
+            if result != old_result:
+                print(f"После префикса/суффикса: {result}")
+        
+        # Нумерация
+        if rules.get('enable_numbering', False):
+            old_result = result
+            result = RulesEngine.apply_numbering(result, index, rules)
+            print(f"После нумерации: {result}")
+        
+        # Приведение расширений
+        if rules.get('lowercase_ext', True):
+            name, ext = os.path.splitext(result)
+            result = name + ext.lower()
+            print(f"После приведения расширений: {result}")
+        
+        print(f"Итоговое имя: {result}")
         return result
     
     @staticmethod
@@ -168,3 +225,38 @@ class RulesEngine:
             result[file_name] = new_name
         
         return result
+    
+    @staticmethod
+    def validate_rules(rules: Dict[str, Any]) -> tuple[bool, str]:
+        """
+        Валидация правил
+        
+        Args:
+            rules: Словарь с правилами
+            
+        Returns:
+            Кортеж (валидно, сообщение_об_ошибке)
+        """
+        try:
+            # Проверка регулярного выражения
+            if rules.get('enable_regex', False):
+                pattern = rules.get('regex_pattern', '')
+                if pattern:
+                    # Попытка компиляции регулярного выражения
+                    flags = re.IGNORECASE if rules.get('regex_ignore_case', False) else 0
+                    if rules.get('regex_dotall', False):
+                        flags |= re.DOTALL
+                    re.compile(pattern, flags)
+            
+            # Проверка замены текста
+            if rules.get('enable_replace', False):
+                replace_from = rules.get('replace_from', '')
+                if not replace_from:
+                    return True, ""  # Пустая замена - это ок
+            
+            return True, ""
+            
+        except re.error as e:
+            return False, f"Ошибка в регулярном выражении: {str(e)}"
+        except Exception as e:
+            return False, f"Ошибка в правилах: {str(e)}"
