@@ -35,7 +35,11 @@ class UndoManager:
         self.max_operations = max_operations
         self.operations: List[RenameOperation] = []
         self.backup_folder = ".renamer_backups"
-        
+    
+    def has_operations(self) -> bool:
+        """Проверка, есть ли операции для отката"""
+        return len(self.operations) > 0
+    
     def create_operation_id(self) -> str:
         # Создание уникального ID для операции
         return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -82,33 +86,46 @@ class UndoManager:
         if not self.operations:
             return False
         
-        operation = self.operations.pop()
+        operation = self.operations[-1]  # Получаем последнюю операцию, но не удаляем её сразу
         
         try:
             success_count = 0
             error_count = 0
             
-            for change in operation.changes:
+            # ВАЖНО: операции переименования нужно применять в обратном порядке
+            # чтобы избежать конфликтов имен
+            for change in reversed(operation.changes):
                 old_name = change['old']
                 new_name = change['new']
                 
-                old_path = os.path.join(operation.folder_path, new_name)
-                new_path = os.path.join(operation.folder_path, old_name)
+                # В откате меняем местами old и new
+                current_path = os.path.join(operation.folder_path, new_name)
+                original_path = os.path.join(operation.folder_path, old_name)
                 
-                if os.path.exists(old_path):
-                    os.rename(old_path, new_path)
+                if os.path.exists(current_path):
+                    # Проверяем, не существует ли уже оригинальный файл
+                    if os.path.exists(original_path):
+                        print(f"Файл уже существует, откат невозможен: {original_path}")
+                        error_count += 1
+                        continue
+                    
+                    os.rename(current_path, original_path)
                     success_count += 1
                 else:
                     error_count += 1
-                    print(f"Файл не найден для отката: {old_path}")
+                    print(f"Файл не найден для отката: {current_path}")
             
-            print(f"Откат выполнен: {success_count} успешно, {error_count} с ошибками")
-            return success_count > 0
-            
+            # Удаляем операцию из истории только если откат был успешным
+            if success_count > 0:
+                self.operations.pop()  # Удаляем операцию после успешного отката
+                print(f"Откат выполнен: {success_count} успешно, {error_count} с ошибками")
+                return True
+            else:
+                print("Не удалось откатить ни один файл")
+                return False
+                
         except Exception as e:
             print(f"Ошибка при откате операции: {e}")
-            # Возвращаем операцию обратно в стек при ошибке
-            self.operations.append(operation)
             return False
     
     def create_backup(self, folder_path: str, files: List[str]) -> Optional[str]:
