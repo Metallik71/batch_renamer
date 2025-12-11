@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QGroupBox, QCheckBox, QRadioButton, QSpinBox,
     QComboBox, QFileDialog, QMessageBox, QProgressBar,
-    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QTextEdit
+    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QTextEdit, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QColor
@@ -88,9 +88,9 @@ class RenamerWindow(QMainWindow):
     def initialize_disabled_fields(self):
         """Инициализация всех полей как отключенных при запуске"""
         self.toggle_replace_fields()
+        self.toggle_replace_mode()
         self.toggle_prefix_suffix_fields()
         self.toggle_numbering_fields()
-        self.toggle_regex_fields()
         self.toggle_exif_fields()
         
     def setup_ui(self):
@@ -203,7 +203,7 @@ class RenamerWindow(QMainWindow):
         
         # Кнопка загрузки
         load_btn = QPushButton("📥 Загрузить файлы")
-        load_btn.setStyleSheet("""
+        load_btn.setStyleSheet(""" 
             QPushButton {
                 background-color: #2ecc71;
                 color: white;
@@ -244,7 +244,7 @@ class RenamerWindow(QMainWindow):
         self.file_table.setColumnCount(4)
         self.file_table.setHorizontalHeaderLabels(["№", "Текущее имя", "Новое имя", "Статус"])
         
-        # Настройка таблица
+        # Настройка таблицы
         self.file_table.setStyleSheet("""
             QTableWidget {
                 font-size: 11px;
@@ -322,7 +322,6 @@ class RenamerWindow(QMainWindow):
         self.create_text_replace_tab()
         self.create_prefix_suffix_tab()
         self.create_numbering_tab()
-        self.create_regex_tab()
         self.create_exif_tab()
         self.create_advanced_tab()
         
@@ -330,22 +329,25 @@ class RenamerWindow(QMainWindow):
         return widget
         
     def create_text_replace_tab(self):
-        # Вкладка 'Замена текста'
+        """Вкладка 'Замена текста' (объединенная: обычная + regex)"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        group = QGroupBox("Простая замена текста")
+        group = QGroupBox("Замена текста")
         group.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
         
         form = QFormLayout()
+        # Уменьшаем расстояние между заголовками и полями ввода
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(5)
         
         # Чекбокс включения замены текста
         self.enable_replace = QCheckBox("Включить замену текста")
@@ -353,42 +355,232 @@ class RenamerWindow(QMainWindow):
         self.enable_replace.stateChanged.connect(self.toggle_replace_fields)
         form.addRow(self.enable_replace)
         
-        # Заменить
+        # Переключатель режимов: обычная замена / регулярные выражения
+        mode_group = QGroupBox("Режим замены")
+        mode_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(3)  # Уменьшаем расстояние между радио-кнопками
+        
+        self.simple_replace_mode = QRadioButton("Простая замена текста")
+        self.simple_replace_mode.setChecked(True)
+        self.regex_replace_mode = QRadioButton("Регулярные выражения")
+        
+        self.simple_replace_mode.toggled.connect(self.toggle_replace_mode)
+        self.regex_replace_mode.toggled.connect(self.toggle_replace_mode)
+        
+        mode_layout.addWidget(self.simple_replace_mode)
+        mode_layout.addWidget(self.regex_replace_mode)
+        form.addRow(mode_group)
+        
+        # Поле "Заменить" - используется в обоих режимах
         self.replace_from = QLineEdit()
-        self.replace_from.setPlaceholderText("Например: IMG_")
-        form.addRow("Заменить:", self.replace_from)
+        self.replace_from.setPlaceholderText("Например: IMG_ (для простой замены) или (\\d{4})-(\\d{2})-(\\d{2}) (для regex)")
+        form.addRow("Найти (шаблон):", self.replace_from)
         
-        # На
+        # Поле "На" - используется в обоих режимах
         self.replace_to = QLineEdit()
-        self.replace_to.setPlaceholderText("Например: Photo_")
-        form.addRow("На:", self.replace_to)
+        self.replace_to.setPlaceholderText("Например: Photo_ (для простой замены) или \\3.\\2.\\1 (для regex)")
+        form.addRow("Заменить на:", self.replace_to)
         
-        # Чекбоксы
+        # Поля для простого режима
+        self.simple_options_group = QGroupBox("Параметры простой замены")
+        self.simple_options_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        simple_options_layout = QVBoxLayout(self.simple_options_group)
+        simple_options_layout.setSpacing(3)  # Уменьшаем расстояние между чекбоксами
+        
         self.case_sensitive = QCheckBox("Учитывать регистр")
         self.replace_all = QCheckBox("Заменить все вхождения")
         self.replace_all.setChecked(True)
         
-        form.addRow(self.case_sensitive)
-        form.addRow(self.replace_all)
+        simple_options_layout.addWidget(self.case_sensitive)
+        simple_options_layout.addWidget(self.replace_all)
+        form.addRow(self.simple_options_group)
         
-        # Пример
-        example_label = QLabel("Пример: 'IMG_1234.jpg' → 'Photo_1234.jpg'")
-        example_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
-        form.addRow(example_label)
+        # Поля для режима регулярных выражений
+        self.regex_options_group = QGroupBox("Параметры регулярных выражений")
+        self.regex_options_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        regex_options_layout = QVBoxLayout(self.regex_options_group)
+        regex_options_layout.setSpacing(3)
+        
+        self.regex_ignore_case = QCheckBox("Игнорировать регистр")
+        self.regex_dotall = QCheckBox("Точка соответствует переводу строки")
+        
+        regex_options_layout.addWidget(self.regex_ignore_case)
+        regex_options_layout.addWidget(self.regex_dotall)
+        form.addRow(self.regex_options_group)
+        
+        # Примеры использования - В ДВЕ КОЛОНКИ
+        examples_group = QGroupBox("Примеры использования")
+        examples_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        examples_layout = QVBoxLayout(examples_group)
+        examples_layout.setSpacing(5)
+        
+        # Создаем контейнер для двух колонок
+        columns_container = QWidget()
+        columns_layout = QHBoxLayout(columns_container)
+        columns_layout.setSpacing(15)  # Отступ между колонками
+        
+        # Левая колонка - Примеры простой замены
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+        
+        simple_examples = QLabel("<b>Примеры простой замены:</b>")
+        simple_examples.setStyleSheet("color: #2c3e50;")
+        left_layout.addWidget(simple_examples)
+        
+        simple_examples_list = [
+            ("'IMG_1234.jpg'", "'Photo_1234.jpg'"),
+            ("'DSC_'", "'Photo_'"),
+            ("'vacation '", "'' (удаление)"),
+            ("'2019_'", "'2024_'"),
+            ("'photo.jpg'", "'image.jpg'"),
+            ("'IMG'", "'Photo'")
+        ]
+        
+        for from_example, to_example in simple_examples_list:
+            example_widget = QWidget()
+            example_layout = QHBoxLayout(example_widget)
+            example_layout.setContentsMargins(0, 0, 0, 0)
+            example_layout.setSpacing(3)
+            
+            from_label = QLabel(from_example)
+            from_label.setStyleSheet("color: #7f8c8d; font-size: 10px; font-family: monospace;")
+            
+            arrow_label = QLabel("→")
+            arrow_label.setStyleSheet("color: #95a5a6; font-size: 10px; padding: 0 5px;")
+            
+            to_label = QLabel(to_example)
+            to_label.setStyleSheet("color: #7f8c8d; font-size: 10px; font-family: monospace;")
+            
+            example_layout.addWidget(from_label)
+            example_layout.addWidget(arrow_label)
+            example_layout.addWidget(to_label)
+            example_layout.addStretch()
+            
+            left_layout.addWidget(example_widget)
+        
+        left_layout.addStretch()
+        columns_layout.addWidget(left_column, 1)
+        
+        # Правая колонка - Примеры регулярных выражений
+        right_column = QWidget()
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        
+        regex_examples = QLabel("<b>Примеры регулярных выражений:</b>")
+        regex_examples.setStyleSheet("color: #2c3e50;")
+        right_layout.addWidget(regex_examples)
+        
+        regex_examples_list = [
+            ("Дата: '(\\d{4})-(\\d{2})-(\\d{2})'", "'\\3.\\2.\\1'"),
+            ("Пробелы: '\\s+'", "''"),
+            ("Числа: '.*?(\\d+).*'", "'\\1'"),
+            ("Перестановка: '(.+)_(\\d+)\\.(.+)'", "'\\2_\\1.\\3'"),
+            ("Удаление цифр: '\\d+'", "''"),
+            ("Формат: 'IMG_(\\d{4})\\.(.+)'", "'Photo_\\1.\\2'")
+        ]
+        
+        for from_example, to_example in regex_examples_list:
+            example_widget = QWidget()
+            example_layout = QHBoxLayout(example_widget)
+            example_layout.setContentsMargins(0, 0, 0, 0)
+            example_layout.setSpacing(3)
+            
+            from_label = QLabel(from_example)
+            from_label.setStyleSheet("color: #7f8c8d; font-size: 10px; font-family: monospace;")
+            
+            arrow_label = QLabel("→")
+            arrow_label.setStyleSheet("color: #95a5a6; font-size: 10px; padding: 0 5px;")
+            
+            to_label = QLabel(to_example)
+            to_label.setStyleSheet("color: #7f8c8d; font-size: 10px; font-family: monospace;")
+            
+            example_layout.addWidget(from_label)
+            example_layout.addWidget(arrow_label)
+            example_layout.addWidget(to_label)
+            example_layout.addStretch()
+            
+            right_layout.addWidget(example_widget)
+        
+        right_layout.addStretch()
+        columns_layout.addWidget(right_column, 1)
+        
+        # Добавляем пояснение
+        explanation = QLabel("<i>Примечание: в регулярных выражениях используйте \\\\1, \\\\2 и т.д. для ссылок на группы</i>")
+        explanation.setStyleSheet("color: #7f8c8d; font-size: 9px; margin-top: 10px;")
+        explanation.setAlignment(Qt.AlignCenter)
+        
+        examples_layout.addWidget(columns_container)
+        examples_layout.addWidget(explanation)
+        form.addRow(examples_group)
         
         group.setLayout(form)
         layout.addWidget(group)
         layout.addStretch()
         
-        self.tab_widget.addTab(tab, "Замена")
+        self.tab_widget.addTab(tab, "Замена текста")
+    
+    def toggle_replace_mode(self):
+        """Переключение между простой заменой и регулярными выражениями"""
+        is_simple_mode = self.simple_replace_mode.isChecked()
         
+        # Показываем/скрываем соответствующие группы параметров
+        self.simple_options_group.setVisible(is_simple_mode)
+        self.regex_options_group.setVisible(not is_simple_mode)
+        
+        # Обновляем подсказки в полях ввода
+        if is_simple_mode:
+            self.replace_from.setPlaceholderText("Например: IMG_ или vacation")
+            self.replace_to.setPlaceholderText("Например: Photo_ или holiday")
+        else:
+            self.replace_from.setPlaceholderText("Например: (\\d{4})-(\\d{2})-(\\d{2}) или \\s+")
+            self.replace_to.setPlaceholderText("Например: \\3.\\2.\\1 или _")
+        
+        # Обновляем доступность полей
+        if self.enable_replace.isChecked():
+            self.case_sensitive.setEnabled(is_simple_mode)
+            self.replace_all.setEnabled(is_simple_mode)
+            self.regex_ignore_case.setEnabled(not is_simple_mode)
+            self.regex_dotall.setEnabled(not is_simple_mode)
+    
     def toggle_replace_fields(self):
         """Включение/выключение полей замены текста"""
         enabled = self.enable_replace.isChecked()
+        self.simple_replace_mode.setEnabled(enabled)
+        self.regex_replace_mode.setEnabled(enabled)
         self.replace_from.setEnabled(enabled)
         self.replace_to.setEnabled(enabled)
-        self.case_sensitive.setEnabled(enabled)
-        self.replace_all.setEnabled(enabled)
+        
+        is_simple_mode = self.simple_replace_mode.isChecked()
+        self.case_sensitive.setEnabled(enabled and is_simple_mode)
+        self.replace_all.setEnabled(enabled and is_simple_mode)
+        self.regex_ignore_case.setEnabled(enabled and not is_simple_mode)
+        self.regex_dotall.setEnabled(enabled and not is_simple_mode)
         
         # Меняем стиль для отключенных полей
         style = "color: #7f8c8d;" if not enabled else ""
@@ -396,6 +588,8 @@ class RenamerWindow(QMainWindow):
         self.replace_to.setStyleSheet(style)
         self.case_sensitive.setStyleSheet(style)
         self.replace_all.setStyleSheet(style)
+        self.regex_ignore_case.setStyleSheet(style)
+        self.regex_dotall.setStyleSheet(style)
         
     def create_prefix_suffix_tab(self):
         # Вкладка 'Префикс/Суффикс'
@@ -408,12 +602,15 @@ class RenamerWindow(QMainWindow):
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
         
         form = QFormLayout()
+        # Уменьшаем расстояние между заголовками и полями ввода
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(5)
         
         # Чекбокс включения префикса/суффикса
         self.enable_prefix_suffix = QCheckBox("Включить префикс/суффикс")
@@ -433,7 +630,15 @@ class RenamerWindow(QMainWindow):
         
         # Радиокнопки для позиции суффикса
         suffix_group = QGroupBox("Позиция суффикса")
-        suffix_layout = QVBoxLayout()
+        suffix_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        suffix_layout = QVBoxLayout(suffix_group)
+        suffix_layout.setSpacing(3)
         
         self.suffix_before_ext = QRadioButton("Перед расширением (file_suffix.ext)")
         self.suffix_before_ext.setChecked(True)
@@ -441,8 +646,6 @@ class RenamerWindow(QMainWindow):
         
         suffix_layout.addWidget(self.suffix_before_ext)
         suffix_layout.addWidget(self.suffix_after_ext)
-        suffix_group.setLayout(suffix_layout)
-        
         form.addRow(suffix_group)
         
         # Пример
@@ -480,12 +683,15 @@ class RenamerWindow(QMainWindow):
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
         
         form = QFormLayout()
+        # Уменьшаем расстояние между заголовками и полями ввода
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(5)
         
         # Чекбокс включения нумерации
         self.enable_numbering = QCheckBox("Включить нумерацию")
@@ -556,84 +762,6 @@ class RenamerWindow(QMainWindow):
         style = "color: #7f8c8d;" if not enabled else ""
         self.number_separator.setStyleSheet(style)
         
-    def create_regex_tab(self):
-        # Вкладка 'Регулярные выражения'
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        group = QGroupBox("Регулярные выражения для сложных замен")
-        group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
-            }
-        """)
-        
-        form = QFormLayout()
-        
-        # Чекбокс включения регулярных выражений
-        self.enable_regex = QCheckBox("Включить регулярные выражения")
-        self.enable_regex.setChecked(False)
-        self.enable_regex.stateChanged.connect(self.toggle_regex_fields)
-        form.addRow(self.enable_regex)
-        
-        # Паттерн
-        self.regex_pattern = QLineEdit()
-        self.regex_pattern.setPlaceholderText(r"Например: (\d{4})-(\d{2})-(\d{2})")
-        form.addRow("Регулярное выражение:", self.regex_pattern)
-        
-        # Замена
-        self.regex_replacement = QLineEdit()
-        self.regex_replacement.setPlaceholderText(r"Например: \3.\2.\1")
-        form.addRow("Замена:", self.regex_replacement)
-        
-        # Чекбоксы
-        self.regex_ignore_case = QCheckBox("Игнорировать регистр")
-        self.regex_dotall = QCheckBox("Точка соответствует переводу строки")
-        
-        form.addRow(self.regex_ignore_case)
-        form.addRow(self.regex_dotall)
-        
-        # Примеры
-        examples_group = QGroupBox("Примеры использования")
-        examples_layout = QVBoxLayout()
-        
-        examples = [
-            "Формат даты: '2023-12-01' → '01.12.2023'",
-            "Удаление пробелов: 'file name.jpg' → 'filename.jpg'",
-            "Извлечение чисел: 'IMG_0456.jpg' → '0456.jpg'"
-        ]
-        
-        for example in examples:
-            label = QLabel(f"• {example}")
-            label.setStyleSheet("color: #7f8c8d; font-size: 10px;")
-            examples_layout.addWidget(label)
-            
-        examples_group.setLayout(examples_layout)
-        form.addRow(examples_group)
-        
-        group.setLayout(form)
-        layout.addWidget(group)
-        layout.addStretch()
-        
-        self.tab_widget.addTab(tab, "Регулярки")
-        
-    def toggle_regex_fields(self):
-        """Включение/выключение полей регулярных выражений"""
-        enabled = self.enable_regex.isChecked()
-        self.regex_pattern.setEnabled(enabled)
-        self.regex_replacement.setEnabled(enabled)
-        self.regex_ignore_case.setEnabled(enabled)
-        self.regex_dotall.setEnabled(enabled)
-        
-        # Меняем стиль для отключенных полей
-        style = "color: #7f8c8d;" if not enabled else ""
-        self.regex_pattern.setStyleSheet(style)
-        self.regex_replacement.setStyleSheet(style)
-        
     def create_exif_tab(self):
         # Вкладка 'EXIF данные'
         tab = QWidget()
@@ -645,12 +773,15 @@ class RenamerWindow(QMainWindow):
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
         
         form = QFormLayout()
+        # Уменьшаем расстояние между заголовками и полями ввода
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(5)
         
         # Включить EXIF
         self.enable_exif = QCheckBox("Включить EXIF данные")
@@ -691,7 +822,15 @@ class RenamerWindow(QMainWindow):
         
         # Дополнительные EXIF данные
         exif_extras = QGroupBox("Дополнительные данные EXIF")
-        extras_layout = QVBoxLayout()
+        exif_extras.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 8px;
+            }
+        """)
+        extras_layout = QVBoxLayout(exif_extras)
+        extras_layout.setSpacing(3)
         
         self.use_camera_model = QCheckBox("Модель камеры")
         self.use_exposure = QCheckBox("Параметры экспозиции")
@@ -700,7 +839,6 @@ class RenamerWindow(QMainWindow):
         extras_layout.addWidget(self.use_camera_model)
         extras_layout.addWidget(self.use_exposure)
         extras_layout.addWidget(self.use_gps)
-        exif_extras.setLayout(extras_layout)
         
         form.addRow(exif_extras)
         
@@ -742,12 +880,13 @@ class RenamerWindow(QMainWindow):
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
     
-        ext_layout = QVBoxLayout()
+        ext_layout = QVBoxLayout(ext_group)
+        ext_layout.setSpacing(3)
     
         self.lowercase_ext = QCheckBox("Приводить расширения к нижнему регистру (.JPG → .jpg)")
         self.lowercase_ext.setChecked(True)
@@ -757,7 +896,6 @@ class RenamerWindow(QMainWindow):
         ext_layout.addWidget(self.lowercase_ext)
         ext_layout.addWidget(self.remove_spaces)
         ext_layout.addWidget(self.keep_original)
-        ext_group.setLayout(ext_layout)
     
         # Группа 2: Фильтрация
         filter_group = QGroupBox("Фильтрация файлов")
@@ -766,12 +904,14 @@ class RenamerWindow(QMainWindow):
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
     
-        filter_layout = QFormLayout()
+        filter_layout = QFormLayout(filter_group)
+        filter_layout.setHorizontalSpacing(8)
+        filter_layout.setVerticalSpacing(5)
 
         self.filter_extensions = QLineEdit()
         self.filter_extensions.setPlaceholderText("jpg, png, pdf, docx (через запятую)")
@@ -782,23 +922,27 @@ class RenamerWindow(QMainWindow):
         self.min_size.setRange(0, 100000)
         filter_layout.addRow("Минимальный размер:", self.min_size)
     
-        filter_group.setLayout(filter_layout)
-    
-        # Группа 3: Сортировка - ИСПРАВЛЕННАЯ ВЕРСИЯ
+        # Группа 3: Сортировка
         sort_group = QGroupBox("Сортировка файлов перед переименованием")
         sort_group.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 15px;
+                margin-top: 5px;
+                padding-top: 10px;
             }
         """)
     
         # Создаем группу для радиокнопок критерия сортировки
         sort_criteria_group = QGroupBox("Критерий сортировки")
-        sort_criteria_layout = QVBoxLayout()
+        sort_criteria_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+            }
+        """)
+        sort_criteria_layout = QVBoxLayout(sort_criteria_group)
+        sort_criteria_layout.setSpacing(3)
         
         self.sort_by_name = QRadioButton("По имени")
         self.sort_by_name.setChecked(True)
@@ -814,11 +958,16 @@ class RenamerWindow(QMainWindow):
         sort_criteria_layout.addWidget(self.sort_by_name)
         sort_criteria_layout.addWidget(self.sort_by_date)
         sort_criteria_layout.addWidget(self.sort_by_size)
-        sort_criteria_group.setLayout(sort_criteria_layout)
     
         # Создаем группу для радиокнопок направления сортировки
         sort_order_group = QGroupBox("Порядок сортировки")
-        sort_order_layout = QVBoxLayout()
+        sort_order_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+            }
+        """)
+        sort_order_layout = QVBoxLayout(sort_order_group)
+        sort_order_layout.setSpacing(3)
         
         self.sort_asc = QRadioButton("По возрастанию")
         self.sort_asc.setChecked(True)
@@ -831,7 +980,6 @@ class RenamerWindow(QMainWindow):
         
         sort_order_layout.addWidget(self.sort_asc)
         sort_order_layout.addWidget(self.sort_desc)
-        sort_order_group.setLayout(sort_order_layout)
     
         # Добавляем обе группы в основную группу сортировки
         sort_layout = QHBoxLayout()
@@ -1042,7 +1190,7 @@ class RenamerWindow(QMainWindow):
             return
             
         try:
-            # Получаем список всех файлов
+            # Получаем список всех файлов из папки
             all_files = self.file_manager.get_files_from_folder(folder_path)
             
             if not all_files:
@@ -1065,14 +1213,9 @@ class RenamerWindow(QMainWindow):
                                   "Нет файлов, соответствующих фильтрам. Измените параметры фильтрации.")
                 return
             
-            # Применяем сортировку - используем сохраненные параметры сортировки
-            sort_by = self.current_sort_by
-            ascending = self.current_ascending
-            
-            # Получаем актуальные настройки из интерфейса
-            if self.sort_by_name.isChecked():
-                sort_by = 'name'
-            elif self.sort_by_date.isChecked():
+            # Применяем сортировку
+            sort_by = 'name'
+            if self.sort_by_date.isChecked():
                 sort_by = 'date'
             elif self.sort_by_size.isChecked():
                 sort_by = 'size'
@@ -1083,7 +1226,7 @@ class RenamerWindow(QMainWindow):
             self.current_sort_by = sort_by
             self.current_ascending = ascending
             
-            # СОРТИРУЕМ файлы
+            # СОРТИРУЕМ файлы (только отфильтрованные)
             sorted_files = self.file_manager.sort_files(filtered_files, folder_path, sort_by, ascending)
             
             # Сохраняем текущий список файлов
@@ -1122,13 +1265,27 @@ class RenamerWindow(QMainWindow):
             file_count = len(sorted_files)
             self.file_counter.setText(f"Файлов: {file_count}")
             
-            # Включаем кнопку предпросмотра
+            # Показываем информацию о фильтрации
+            filter_info = []
+            if extensions:
+                filter_info.append(f"расширения: {extensions}")
+            if min_size > 0:
+                filter_info.append(f"мин. размер: {min_size}KB")
+            
+            status_text = f"Загружено {file_count} файлов"
+            if filter_info:
+                status_text += f" (фильтр: {', '.join(filter_info)})"
+            status_text += f", отсортировано по {sort_by} ({'возрастанию' if ascending else 'убыванию'})"
+            
+            # Включаем кнопки
             self.preview_btn.setEnabled(True)
             self.sort_btn.setEnabled(True)
             self.apply_btn.setEnabled(False)
-            self.undo_btn.setEnabled(False)
             
-            self.status_label.setText(f"Загружено {file_count} файлов, отсортировано по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
+            # Обновляем состояние кнопки отката
+            self.undo_btn.setEnabled(self.undo_manager.has_operations())
+            
+            self.status_label.setText(status_text)
             self.progress_bar.setValue(0)
             
         except Exception as e:
@@ -1137,11 +1294,27 @@ class RenamerWindow(QMainWindow):
             
     def resort_files(self):
         """Пересортировать файлы с текущими параметрами"""
-        if not self.current_folder or not self.current_files:
+        if not self.current_folder:
             QMessageBox.warning(self, "Внимание", "Сначала загрузите файлы!")
             return
         
         try:
+            # Получаем все файлы из папки
+            all_files = self.file_manager.get_files_from_folder(self.current_folder)
+            
+            # Применяем фильтрацию по расширениям
+            extensions = self.filter_extensions.text()
+            filtered_files = self.file_manager.filter_files_by_extension(all_files, extensions)
+            
+            # Применяем фильтрация по размеру
+            min_size = self.min_size.value()
+            filtered_files = self.file_manager.filter_files_by_size(filtered_files, self.current_folder, min_size)
+            
+            if not filtered_files:
+                QMessageBox.warning(self, "Внимание", 
+                                  "Нет файлов, соответствующих фильтрам. Измените параметры фильтрации.")
+                return
+            
             # Получаем актуальные настройки сортировки из интерфейса
             sort_by = 'name'
             if self.sort_by_date.isChecked():
@@ -1155,58 +1328,84 @@ class RenamerWindow(QMainWindow):
             self.current_sort_by = sort_by
             self.current_ascending = ascending
             
-            # Сортируем текущий список файлов
-            sorted_files = self.file_manager.sort_files(self.current_files, self.current_folder, sort_by, ascending)
+            # Сортируем отфильтрованные файлы
+            sorted_files = self.file_manager.sort_files(filtered_files, self.current_folder, sort_by, ascending)
             
-            if sorted_files != self.current_files:
-                self.current_files = sorted_files
+            # Обновляем текущий список файлов
+            self.current_files = sorted_files
+            
+            # Обновляем таблицу
+            self.file_table.setRowCount(len(sorted_files))
+            
+            for i, filename in enumerate(sorted_files):
+                # Номер
+                num_item = QTableWidgetItem(str(i + 1))
+                num_item.setTextAlignment(Qt.AlignCenter)
+                num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 0, num_item)
                 
-                # Обновляем таблицу
-                for i, filename in enumerate(sorted_files):
-                    if i < self.file_table.rowCount():
-                        # Обновляем номер
-                        num_item = QTableWidgetItem(str(i + 1))
-                        num_item.setTextAlignment(Qt.AlignCenter)
-                        num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
-                        self.file_table.setItem(i, 0, num_item)
-                        
-                        # Текущее имя
-                        old_item = QTableWidgetItem(filename)
-                        old_item.setFlags(old_item.flags() & ~Qt.ItemIsEditable)
-                        self.file_table.setItem(i, 1, old_item)
-                        
-                        # Сбрасываем новое имя
-                        new_item = QTableWidgetItem(filename)
-                        new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
-                        self.file_table.setItem(i, 2, new_item)
-                        
-                        # Сбрасываем статус
-                        status_item = QTableWidgetItem("⏳ Ожидание")
-                        status_item.setTextAlignment(Qt.AlignCenter)
-                        status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
-                        status_item.setBackground(QColor("#fff9e6"))
-                        status_item.setForeground(QColor("#f39c12"))
-                        self.file_table.setItem(i, 3, status_item)
+                # Текущее имя
+                old_item = QTableWidgetItem(filename)
+                old_item.setFlags(old_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 1, old_item)
                 
-                self.status_label.setText(f"Файлы отсортированы по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
-                self.preview_results.clear()  # Сбрасываем предпросмотр
-                self.apply_btn.setEnabled(False)  # Отключаем кнопку применения
+                # Сбрасываем новое имя
+                new_item = QTableWidgetItem(filename)
+                new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
+                self.file_table.setItem(i, 2, new_item)
                 
-                QMessageBox.information(self, "Успех", 
-                                      f"Файлы отсортированы по {sort_by} ({'возрастанию' if ascending else 'убыванию'})")
+                # Сбрасываем статус
+                status_item = QTableWidgetItem("⏳ Ожидание")
+                status_item.setTextAlignment(Qt.AlignCenter)
+                status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+                status_item.setBackground(QColor("#fff9e6"))
+                status_item.setForeground(QColor("#f39c12"))
+                self.file_table.setItem(i, 3, status_item)
+            
+            # Обновляем счетчик
+            file_count = len(sorted_files)
+            self.file_counter.setText(f"Файлов: {file_count}")
+            
+            # Показываем информацию о фильтрации
+            filter_info = []
+            if extensions:
+                filter_info.append(f"расширения: {extensions}")
+            if min_size > 0:
+                filter_info.append(f"мин. размер: {min_size}KB")
+            
+            status_text = f"Отсортировано {file_count} файлов"
+            if filter_info:
+                status_text += f" (фильтр: {', '.join(filter_info)})"
+            status_text += f" по {sort_by} ({'возрастанию' if ascending else 'убыванию'})"
+            
+            self.status_label.setText(status_text)
+            self.preview_results.clear()  # Сбрасываем предпросмотр
+            self.apply_btn.setEnabled(False)  # Отключаем кнопку применения
             
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка при сортировке:\n{str(e)}")
             
     def collect_rules(self) -> Dict[str, Any]:
         # Сбор всех правил из интерфейса
+        is_simple_mode = self.simple_replace_mode.isChecked()
+        
         rules = {
-            # Замена текста
+            # Замена текста (объединенная)
             'enable_replace': self.enable_replace.isChecked(),
             'replace_from': self.replace_from.text(),
             'replace_to': self.replace_to.text(),
-            'case_sensitive': self.case_sensitive.isChecked(),
-            'replace_all': self.replace_all.isChecked(),
+            
+            # Параметры для простого режима
+            'simple_mode': is_simple_mode,
+            'case_sensitive': self.case_sensitive.isChecked() if is_simple_mode else False,
+            'replace_all': self.replace_all.isChecked() if is_simple_mode else True,
+            
+            # Параметры для режима регулярных выражений
+            'enable_regex': not is_simple_mode and self.enable_replace.isChecked(),
+            'regex_pattern': self.replace_from.text() if not is_simple_mode else '',
+            'regex_replacement': self.replace_to.text() if not is_simple_mode else '',
+            'regex_ignore_case': self.regex_ignore_case.isChecked() if not is_simple_mode else False,
+            'regex_dotall': self.regex_dotall.isChecked() if not is_simple_mode else False,
             
             # Префикс/суффикс
             'enable_prefix_suffix': self.enable_prefix_suffix.isChecked(),
@@ -1220,13 +1419,6 @@ class RenamerWindow(QMainWindow):
             'digits_count': self.digits_count.value(),
             'number_separator': self.number_separator.text(),
             'number_position': 'prefix' if self.number_prefix.isChecked() else 'suffix',
-            
-            # Регулярные выражения
-            'enable_regex': self.enable_regex.isChecked(),
-            'regex_pattern': self.regex_pattern.text(),
-            'regex_replacement': self.regex_replacement.text(),
-            'regex_ignore_case': self.regex_ignore_case.isChecked(),
-            'regex_dotall': self.regex_dotall.isChecked(),
             
             # EXIF
             'enable_exif': self.enable_exif.isChecked(),
@@ -1242,7 +1434,7 @@ class RenamerWindow(QMainWindow):
             'remove_spaces': self.remove_spaces.isChecked(),
             'keep_original': self.keep_original.isChecked(),
             
-            # Параметры сортировки (для правильного порядка применения)
+            # Параметры сортировки
             'sort_by': self.current_sort_by,
             'ascending': self.current_ascending,
         }
@@ -1364,6 +1556,9 @@ class RenamerWindow(QMainWindow):
             if backup_path:
                 self.status_label.setText(f"Создана резервная копия в {backup_path}")
         
+        # ВАЖНО: Сохраняем копию изменений ДО переименования
+        changes_copy = changes.copy()
+        
         # Выполняем переименование
         success_count = 0
         error_count = 0
@@ -1397,9 +1592,19 @@ class RenamerWindow(QMainWindow):
         
         # После переименования перезагружаем файлы
         if success_count > 0:
-            # Добавляем операцию в историю
-            self.undo_manager.add_operation(folder_path, changes)
-            self.undo_btn.setEnabled(True)
+            # Добавляем операцию в историю ТОЛЬКО если были успешные изменения
+            # Используем changes_copy (изменения до переименования)
+            successful_changes = []
+            for change in changes_copy:
+                old_path = os.path.join(folder_path, change['old'])
+                new_path = os.path.join(folder_path, change['new'])
+                # Проверяем, существует ли файл с новым именем (успешно переименован)
+                if os.path.exists(new_path):
+                    successful_changes.append(change)
+            
+            if successful_changes:
+                self.undo_manager.add_operation(folder_path, successful_changes)
+                self.undo_btn.setEnabled(True)
             
             # Перезагружаем файлы для обновления списка
             self.load_files()
@@ -1438,6 +1643,10 @@ class RenamerWindow(QMainWindow):
     def undo_changes(self):
         # Откат последней операции
         # Проверяем, есть ли операции для отката
+        if not self.undo_manager.has_operations():
+            QMessageBox.information(self, "Информация", "Нет операций для отката")
+            return
+        
         last_op = self.undo_manager.get_last_operation()
         if not last_op:
             QMessageBox.information(self, "Информация", "Нет операций для отката")
@@ -1462,7 +1671,10 @@ class RenamerWindow(QMainWindow):
             # Обновляем интерфейс
             self.load_files()  # Перезагружаем файлы
             self.status_label.setText("Последняя операция отменена")
-            self.undo_btn.setEnabled(self.undo_manager.get_last_operation() is not None)
+            
+            # Обновляем состояние кнопки отката
+            self.undo_btn.setEnabled(self.undo_manager.has_operations())
+            
             QMessageBox.information(self, "Успех", "Операция успешно отменена")
         else:
             QMessageBox.warning(self, "Ошибка", "Не удалось отменить операцию")
@@ -1484,15 +1696,18 @@ class RenamerWindow(QMainWindow):
         self.enable_replace.setChecked(False)
         self.enable_prefix_suffix.setChecked(False)
         self.enable_numbering.setChecked(False)
-        self.enable_regex.setChecked(False)
         self.enable_exif.setChecked(False)
         
-        # Сбрасываем поля ввода
+        # Сбрасываем поля ввода для замены текста
         self.replace_from.clear()
         self.replace_to.clear()
+        self.simple_replace_mode.setChecked(True)  # Возвращаем к простому режиму
         self.case_sensitive.setChecked(False)
         self.replace_all.setChecked(True)
+        self.regex_ignore_case.setChecked(False)
+        self.regex_dotall.setChecked(False)
         
+        # Сбрасываем другие поля
         self.prefix_text.clear()
         self.suffix_text.clear()
         self.suffix_before_ext.setChecked(True)
@@ -1501,11 +1716,6 @@ class RenamerWindow(QMainWindow):
         self.digits_count.setValue(3)
         self.number_separator.setText("_")
         self.number_suffix.setChecked(True)
-        
-        self.regex_pattern.clear()
-        self.regex_replacement.clear()
-        self.regex_ignore_case.setChecked(False)
-        self.regex_dotall.setChecked(False)
         
         self.date_format.setCurrentIndex(0)
         self.date_prefix.setChecked(True)
@@ -1538,3 +1748,6 @@ class RenamerWindow(QMainWindow):
         self.status_label.setText("Все правила очищены, предпросмотр сброшен")
         self.apply_btn.setEnabled(False)
         self.sort_btn.setEnabled(len(self.current_files) > 0)
+        
+        # Обновляем видимость групп параметров
+        self.toggle_replace_mode()
