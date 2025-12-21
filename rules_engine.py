@@ -1,6 +1,5 @@
 # Движок для обработки правил переименования
 
-
 import os
 import re
 from typing import Dict, Any, List, Optional
