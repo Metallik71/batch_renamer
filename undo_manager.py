@@ -1,6 +1,5 @@
 # Модуль для управления откатом операций
 
-
 import os
 import shutil
 import json
