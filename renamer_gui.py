@@ -2,22 +2,26 @@
 
 import os
 import re
+import json
 from typing import List, Dict, Any
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QMutex
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QGroupBox, QCheckBox, QRadioButton, QSpinBox,
     QComboBox, QFileDialog, QMessageBox, QProgressBar,
-    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QTextEdit, QSizePolicy
+    QSplitter, QHeaderView, QFormLayout, QButtonGroup, QTextEdit, 
+    QSizePolicy, QDialog, QTreeWidget, QTreeWidgetItem, QStackedWidget,
+    QScrollArea, QApplication, QMenu, QShortcut
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QColor
+from PyQt5.QtGui import QFont, QIcon, QColor, QKeySequence
 
 # Импортируем модули
 try:
     from file_manager import FileManager
     from rules_engine import RulesEngine
-   # from exif_processor import EXIFProcessor
+    from exif_processor import EXIFProcessor
     from undo_manager import UndoManager
 except ImportError as e:
     print(f"Ошибка импорта модулей: {e}")
@@ -40,6 +44,7 @@ class PreviewWorker(QThread):
         self.folder_path = folder_path
         self.sort_by = sort_by
         self.ascending = ascending
+        self._is_running = True  # Флаг для контроля выполнения
         
     def run(self):
         # Выполнение предпросмотра в фоновом потоке
@@ -47,8 +52,11 @@ class PreviewWorker(QThread):
             results = {}
             total_files = len(self.files)
             
-            # Создаем список пар (старое имя, индекс) для правильной нумерации
             for i, file_name in enumerate(self.files):
+                # Проверяем флаг перед выполнением следующей итерации
+                if not self._is_running:
+                    break
+                    
                 # Обновляем прогресс
                 progress = int((i + 1) / total_files * 100)
                 self.progress_updated.emit(progress)
@@ -59,14 +67,926 @@ class PreviewWorker(QThread):
                 # Применяем EXIF данные если нужно
                 if self.rules.get('enable_exif', False):
                     file_path = os.path.join(self.folder_path, file_name)
-                #    new_name = EXIFProcessor.add_exif_to_filename(new_name, file_path, self.rules)
+                    
+                    # Проверяем, является ли файл изображением и существует ли он
+                    image_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', 
+                                       '.bmp', '.gif', '.webp', '.heic', '.nef', 
+                                       '.cr2', '.arw', '.dng'}
+                    file_ext = os.path.splitext(file_name)[1].lower()
+                    
+                    if file_ext in image_extensions:
+                        if os.path.exists(file_path):
+                            try:
+                                # Используем новый метод из EXIFProcessor
+                                template = self.rules.get('exif_template', '{date}_{camera}')
+                                exif_name = EXIFProcessor.generate_filename_from_exif(
+                                    new_name, file_path, template
+                                )
+                                
+                                # Применяем дополнительные настройки
+                                if self.rules.get('clean_exif_names', True):
+                                    exif_name = EXIFProcessor.clean_for_filename(exif_name)
+                                
+                                if self.rules.get('exif_lowercase', False):
+                                    name_part, ext = os.path.splitext(exif_name)
+                                    exif_name = name_part.lower() + ext
+                                
+                                if self.rules.get('exif_replace_spaces', True):
+                                    exif_name = exif_name.replace(' ', '_')
+                                
+                                new_name = exif_name
+                            except Exception as e:
+                                # Если ошибка при чтении EXIF, оставляем имя без изменений
+                                print(f"Ошибка при обработке EXIF для файла {file_name}: {e}")
+                        else:
+                            print(f"Файл не существует: {file_path}")
+                    else:
+                        # Не изображение - оставляем имя без изменений
+                        pass
                 
                 results[file_name] = new_name
             
-            self.preview_finished.emit(results)
+            if self._is_running:  # Отправляем результаты только если не прервали
+                self.preview_finished.emit(results)
             
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            if self._is_running:  # Отправляем ошибку только если не прервали
+                self.error_occurred.emit(str(e))
+    
+    def stop(self):
+        """Безопасная остановка потока"""
+        self._is_running = False
+        self.quit()
+        if not self.wait(2000):  # Ждем до 2 секунд для завершения
+            print("Предупреждение: поток не завершился вовремя")
+            self.terminate()  # Принудительное завершение
+
+
+class EXIFPreviewDialog(QDialog):
+    """Диалог для просмотра EXIF данных с безопасным закрытием"""
+    
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.exif_data = {}
+        self.is_closing = False  # Флаг для предотвращения повторного закрытия
+        self.setWindowTitle(f"EXIF данные: {os.path.basename(file_path)}")
+        self.setGeometry(300, 300, 800, 700)
+        self.setup_ui()
+        
+        # Используем таймер для отложенной загрузки данных
+        QTimer.singleShot(50, self.safe_load_exif_data)
+    
+    def safe_load_exif_data(self):
+        """Безопасная загрузка EXIF данных"""
+        if self.is_closing:
+            return
+            
+        try:
+            self.load_exif_data()
+        except Exception as e:
+            if not self.is_closing:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить EXIF данные:\n{str(e)}")
+            self.force_close()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Заголовок
+        header = QHBoxLayout()
+        title = QLabel(f"📷 EXIF данные: {os.path.basename(self.file_path)}")
+        title.setFont(QFont("Arial", 12, QFont.Bold))
+        header.addWidget(title)
+        header.addStretch()
+        
+        # Кнопка обновления
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setToolTip("Обновить данные")
+        refresh_btn.clicked.connect(lambda: QTimer.singleShot(10, self.safe_load_exif_data))
+        refresh_btn.setFixedSize(30, 30)
+        header.addWidget(refresh_btn)
+        
+        layout.addLayout(header)
+        
+        # Вкладки
+        self.tabs = QTabWidget()
+        
+        # Вкладка 1: Быстрый просмотр
+        self.quick_tab = QWidget()
+        self.quick_layout = QVBoxLayout(self.quick_tab)
+        
+        # Сводная информация
+        summary_group = QGroupBox("📊 Сводная информация")
+        summary_layout = QFormLayout(summary_group)
+        
+        self.summary_labels = {
+            'camera': QLabel(""),
+            'date': QLabel(""),
+            'lens': QLabel(""),
+            'exposure': QLabel(""),
+            'dimensions': QLabel(""),
+            'has_exif': QLabel("")
+        }
+        
+        summary_layout.addRow("Камера:", self.summary_labels['camera'])
+        summary_layout.addRow("Дата съемки:", self.summary_labels['date'])
+        summary_layout.addRow("Объектив:", self.summary_labels['lens'])
+        summary_layout.addRow("Экспозиция:", self.summary_labels['exposure'])
+        summary_layout.addRow("Разрешение:", self.summary_labels['dimensions'])
+        summary_layout.addRow("Статус:", self.summary_labels['has_exif'])
+        
+        self.quick_layout.addWidget(summary_group)
+        
+        # Шаблон
+        template_group = QGroupBox("🏷️ Быстрый шаблон имени")
+        template_layout = QVBoxLayout(template_group)
+        
+        self.template_input = QLineEdit()
+        self.template_input.setText("{date}_{camera}_{focal}mm_F{aperture}_ISO{iso}")
+        self.template_input.textChanged.connect(self.update_preview)
+        template_layout.addWidget(QLabel("Шаблон:"))
+        template_layout.addWidget(self.template_input)
+        
+        # Быстрые пресеты
+        presets_layout = QHBoxLayout()
+        
+        presets = [
+            ("📅 Только дата", "{date}"),
+            ("📸 Дата+Камера", "{date}_{camera}"),
+            ("⚙️ Параметры", "{date}_{focal}mm_F{aperture}_ISO{iso}"),
+            ("🎯 Полный", "{date}_{camera}_{focal}mm_F{aperture}_{shutter}_ISO{iso}")
+        ]
+        
+        for name, template in presets:
+            btn = QPushButton(name)
+            btn.clicked.connect(lambda checked, t=template: self.set_template(t))
+            presets_layout.addWidget(btn)
+        
+        template_layout.addLayout(presets_layout)
+        
+        # Предпросмотр
+        preview_box = QGroupBox("👁️ Предпросмотр имени файла")
+        preview_layout = QVBoxLayout(preview_box)
+        
+        self.preview_label = QLabel("Загрузка...")
+        self.preview_label.setStyleSheet("""
+            QLabel {
+                padding: 15px;
+                background: #f8f9fa;
+                border: 2px solid #dee2e6;
+                border-radius: 6px;
+                color: #495057;
+                font-family: monospace;
+                font-size: 12px;
+                min-height: 80px;
+            }
+        """)
+        self.preview_label.setWordWrap(True)
+        preview_layout.addWidget(self.preview_label)
+        
+        template_layout.addWidget(preview_box)
+        self.quick_layout.addWidget(template_group)
+        self.quick_layout.addStretch()
+        
+        # Вкладка 2: Структурированный просмотр
+        self.tree_tab = QWidget()
+        tree_layout = QVBoxLayout(self.tree_tab)
+        
+        self.exif_tree = QTreeWidget()
+        self.exif_tree.setHeaderLabels(["Тег", "Значение"])
+        self.exif_tree.setColumnWidth(0, 250)
+        self.exif_tree.setColumnWidth(1, 400)
+        tree_layout.addWidget(self.exif_tree)
+        
+        # Вкладка 3: Сырые данные
+        self.raw_tab = QWidget()
+        raw_layout = QVBoxLayout(self.raw_tab)
+        
+        self.raw_text = QTextEdit()
+        self.raw_text.setReadOnly(True)
+        self.raw_text.setFont(QFont("Courier", 9))
+        raw_layout.addWidget(self.raw_text)
+        
+        # Вкладка 4: Доступные плейсхолдеры
+        self.placeholders_tab = QWidget()
+        placeholders_layout = QVBoxLayout(self.placeholders_tab)
+        
+        placeholders_group = QGroupBox("📝 Доступные плейсхолдеры")
+        placeholders_inner = QVBoxLayout(placeholders_group)
+        
+        self.placeholder_text = QTextEdit()
+        self.placeholder_text.setReadOnly(True)
+        self.placeholder_text.setFont(QFont("Courier", 9))
+        
+        # Формируем список плейсхолдеров
+        placeholders_info = "Доступные плейсхолдеры для шаблонов:\n"
+        placeholders_info += "=" * 50 + "\n"
+        
+        for placeholder, description in EXIFProcessor.get_supported_placeholders().items():
+            placeholders_info += f"{placeholder:<20} - {description}\n"
+        
+        placeholders_info += "\nПримеры шаблонов:\n"
+        placeholders_info += "- {date}_{camera}_{iso}\n"
+        placeholders_info += "- {date}_{time}_{focal}mm_F{aperture}\n"
+        placeholders_info += "- {camera}_{datetime}_{lens}\n"
+        
+        self.placeholder_text.setText(placeholders_info)
+        placeholders_inner.addWidget(self.placeholder_text)
+        
+        placeholders_layout.addWidget(placeholders_group)
+        placeholders_layout.addStretch()
+        
+        # Добавляем вкладки
+        self.tabs.addTab(self.quick_tab, "⚡ Быстрый просмотр")
+        self.tabs.addTab(self.tree_tab, "📊 Структура")
+        self.tabs.addTab(self.raw_tab, "📄 Сырые данные")
+        self.tabs.addTab(self.placeholders_tab, "❓ Плейсхолдеры")
+        
+        layout.addWidget(self.tabs)
+        
+        # Кнопки
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        
+        self.copy_template_btn = QPushButton("📋 Копировать шаблон")
+        self.copy_template_btn.clicked.connect(self.safe_copy_template)
+        buttons.addWidget(self.copy_template_btn)
+        
+        self.copy_exif_btn = QPushButton("📋 Копировать EXIF")
+        self.copy_exif_btn.clicked.connect(self.safe_copy_exif_data)
+        buttons.addWidget(self.copy_exif_btn)
+        
+        self.apply_btn = QPushButton("✅ Использовать шаблон")
+        self.apply_btn.clicked.connect(self.safe_use_template)
+        self.apply_btn.setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold;")
+        buttons.addWidget(self.apply_btn)
+        
+        self.close_btn = QPushButton("Закрыть")
+        self.close_btn.clicked.connect(self.safe_close)
+        buttons.addWidget(self.close_btn)
+        
+        layout.addLayout(buttons)
+    
+    def load_exif_data(self):
+        """Загрузка EXIF данных"""
+        try:
+            if self.is_closing:
+                return
+                
+            # Проверяем существование файла
+            if not os.path.exists(self.file_path):
+                if not self.is_closing:
+                    QMessageBox.critical(self, "Ошибка", f"Файл не существует:\n{self.file_path}")
+                self.force_close()
+                return
+            
+            # Проверяем, что это файл (а не папка)
+            if not os.path.isfile(self.file_path):
+                if not self.is_closing:
+                    QMessageBox.critical(self, "Ошибка", f"Путь указывает на папку, а не на файл:\n{self.file_path}")
+                self.force_close()
+                return
+            
+            self.exif_data = EXIFProcessor.get_all_exif_data(self.file_path)
+            
+            if not self.exif_data:
+                self.show_no_exif_message()
+                return
+            
+            # Обновляем сводную информацию
+            self.update_summary_info()
+            
+            # Заполняем дерево
+            self.exif_tree.clear()
+            
+            # Группируем по категориям
+            categories = {
+                "📅 Дата и время": ['DateTime', 'DateTimeOriginal', 'DateTimeDigitized', 'SubSecTime'],
+                "📸 Камера": ['Make', 'Model', 'BodySerialNumber', 'Software', 'Artist', 'Copyright'],
+                "🔍 Объектив": ['LensModel', 'LensMake', 'LensSerialNumber', 'FocalLength', 
+                               'FocalLengthIn35mmFilm', 'MaxApertureValue'],
+                "⚙️ Экспозиция": ['ExposureTime', 'FNumber', 'ExposureProgram', 'ISOSpeedRatings', 
+                                 'ExposureBiasValue', 'MeteringMode', 'Flash', 'LightSource',
+                                 'WhiteBalance', 'SceneCaptureType'],
+                "📐 Изображение": ['ImageWidth', 'ImageHeight', 'XResolution', 'YResolution',
+                                 'ResolutionUnit', 'ColorSpace', 'Orientation', 'BitsPerSample'],
+                "📍 GPS": ['GPSInfo'],
+                "🏷️ Другое": ['ImageDescription', 'Rating', 'Keywords', 'Subject']
+            }
+            
+            for category, tags in categories.items():
+                category_item = QTreeWidgetItem(self.exif_tree, [category, ""])
+                category_item.setExpanded(True)
+                
+                for tag in tags:
+                    if tag in self.exif_data:
+                        value = self.exif_data[tag]
+                        formatted = EXIFProcessor.format_exif_value(tag, value)
+                        item = QTreeWidgetItem(category_item, [tag, formatted])
+            
+            # Сырые данные
+            try:
+                raw_text = json.dumps(self.exif_data, indent=2, default=str)
+                self.raw_text.setPlainText(raw_text)
+            except:
+                self.raw_text.setPlainText("Не удалось преобразовать в JSON")
+            
+            # Обновляем предпросмотр
+            self.update_preview()
+            
+        except Exception as e:
+            if not self.is_closing:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить EXIF данные:\n{str(e)}")
+                self.force_close()
+    
+    def show_no_exif_message(self):
+        """Показать сообщение об отсутствии EXIF"""
+        self.summary_labels['has_exif'].setText("❌ Нет EXIF данных")
+        self.summary_labels['has_exif'].setStyleSheet("color: #dc3545; font-weight: bold;")
+        
+        self.exif_tree.clear()
+        no_data_item = QTreeWidgetItem(self.exif_tree, ["Нет данных", "Файл не содержит EXIF метаданных"])
+        no_data_item.setForeground(0, QColor("#6c757d"))
+        
+        self.raw_text.setPlainText("Файл не содержит EXIF метаданных.")
+        self.preview_label.setText("❌ Файл не содержит EXIF данных для генерации имени")
+    
+    def update_summary_info(self):
+        """Обновление сводной информации"""
+        try:
+            summary = EXIFProcessor.get_exif_summary(self.file_path)
+            
+            if summary.get('has_exif'):
+                self.summary_labels['has_exif'].setText("✅ Есть EXIF данные")
+                self.summary_labels['has_exif'].setStyleSheet("color: #28a745; font-weight: bold;")
+                
+                self.summary_labels['camera'].setText(f"{summary.get('make', '')} {summary.get('camera', '')}")
+                self.summary_labels['date'].setText(f"{summary.get('date', '')} {summary.get('time', '')}")
+                self.summary_labels['lens'].setText(summary.get('lens', 'Неизвестно'))
+                
+                exposure_parts = []
+                if summary.get('aperture'):
+                    exposure_parts.append(summary['aperture'])
+                if summary.get('shutter_speed'):
+                    exposure_parts.append(summary['shutter_speed'])
+                if summary.get('iso'):
+                    exposure_parts.append(summary['iso'])
+                
+                self.summary_labels['exposure'].setText(" ".join(exposure_parts) if exposure_parts else "Неизвестно")
+                self.summary_labels['dimensions'].setText(summary.get('dimensions', 'Неизвестно'))
+            else:
+                self.summary_labels['has_exif'].setText("❌ Нет EXIF данных")
+                self.summary_labels['has_exif'].setStyleSheet("color: #dc3545; font-weight: bold;")
+        except Exception as e:
+            print(f"Ошибка при обновлении сводной информации: {e}")
+            self.summary_labels['has_exif'].setText("❌ Ошибка при загрузке данных")
+    
+    def update_preview(self):
+        """Обновление предпросмотра имени"""
+        try:
+            if not self.exif_data:
+                self.preview_label.setText("❌ Нет EXIF данных для генерации имени")
+                return
+            
+            template = self.template_input.text()
+            original = os.path.basename(self.file_path)
+            
+            # Проверяем шаблон
+            is_valid, error_msg = EXIFProcessor.validate_template(template)
+            if not is_valid:
+                self.preview_label.setText(f"⚠️ Ошибка в шаблоне: {error_msg}")
+                return
+            
+            # Генерируем новое имя
+            new_name = EXIFProcessor.generate_filename_from_exif(original, self.file_path, template)
+            
+            if new_name == original:
+                self.preview_label.setText("ℹ️ Имя не изменится (нет данных для подстановки)")
+            else:
+                self.preview_label.setText(f"{original}\n↓\n{new_name}")
+            
+        except Exception as e:
+            self.preview_label.setText(f"⚠️ Ошибка: {str(e)}")
+    
+    def set_template(self, template: str):
+        """Установить шаблон"""
+        self.template_input.setText(template)
+    
+    def safe_copy_template(self):
+        """Безопасное копирование шаблона в буфер"""
+        if self.is_closing:
+            return
+            
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(self.template_input.text())
+            QMessageBox.information(self, "Скопировано", "Шаблон скопирован в буфер обмена")
+        except Exception as e:
+            if not self.is_closing:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось скопировать шаблон:\n{str(e)}")
+    
+    def safe_copy_exif_data(self):
+        """Безопасное копирование EXIF данных в буфер"""
+        if self.is_closing:
+            return
+            
+        try:
+            clipboard = QApplication.clipboard()
+            
+            # Формируем текстовое представление
+            exif_text = f"EXIF данные: {os.path.basename(self.file_path)}\n"
+            exif_text += "=" * 50 + "\n\n"
+            
+            if self.exif_data:
+                for key, value in self.exif_data.items():
+                    try:
+                        formatted = EXIFProcessor.format_exif_value(key, value)
+                        exif_text += f"{key}: {formatted}\n"
+                    except:
+                        exif_text += f"{key}: {value}\n"
+            else:
+                exif_text += "Нет EXIF данных"
+            
+            clipboard.setText(exif_text)
+            QMessageBox.information(self, "Скопировано", "EXIF данные скопированы в буфер обмена")
+        except Exception as e:
+            if not self.is_closing:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось скопировать EXIF данные:\n{str(e)}")
+    
+    def safe_use_template(self):
+        """Безопасное использование шаблона в основном окне"""
+        if self.is_closing:
+            return
+            
+        template = self.template_input.text()
+        
+        try:
+            # Ищем родительское окно RenamerWindow
+            parent = self.parent()
+            while parent and not isinstance(parent, RenamerWindow):
+                parent = parent.parent()
+            
+            if parent and hasattr(parent, 'exif_widget'):
+                try:
+                    # Включаем EXIF если выключен
+                    if not parent.exif_widget.enable_exif.isChecked():
+                        parent.exif_widget.enable_exif.setChecked(True)
+                    
+                    # Устанавливаем шаблон
+                    parent.exif_widget.set_template(template)
+                    
+                    if not self.is_closing:
+                        QMessageBox.information(
+                            self,
+                            "Шаблон установлен",
+                            "Шаблон EXIF установлен в основном окне.\n"
+                            "Теперь вы можете применить его ко всем файлам."
+                        )
+                except Exception as e:
+                    if not self.is_closing:
+                        QMessageBox.warning(self, "Ошибка", f"Не удалось установить шаблон:\n{str(e)}")
+            
+            self.accept()
+        except Exception as e:
+            if not self.is_closing:
+                QMessageBox.critical(self, "Ошибка", f"Ошибка при использовании шаблона:\n{str(e)}")
+    
+    def safe_close(self):
+        """Безопасное закрытие диалога"""
+        if not self.is_closing:
+            self.accept()
+    
+    def force_close(self):
+        """Принудительное закрытие диалога"""
+        self.is_closing = True
+        try:
+            self.reject()
+        except:
+            try:
+                self.close()
+            except:
+                pass
+    
+    def closeEvent(self, event):
+        """Обработчик закрытия окна"""
+        self.is_closing = True
+        event.accept()
+
+
+class EXIFTemplateWidget(QWidget):
+    """Виджет для работы с EXIF шаблонами (встраивается в основное окне)"""
+    
+    template_changed = pyqtSignal(str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Включение EXIF
+        self.enable_exif = QCheckBox("🏷️ Использовать EXIF для именования")
+        self.enable_exif.setChecked(False)
+        self.enable_exif.stateChanged.connect(self.on_toggle)
+        layout.addWidget(self.enable_exif)
+        
+        # Контейнер для настроек (скрыт по умолчанию)
+        self.settings_container = QWidget()
+        settings_layout = QVBoxLayout(self.settings_container)
+        settings_layout.setContentsMargins(20, 10, 0, 0)
+        
+        # Шаблон
+        template_group = QGroupBox("Шаблон имени из EXIF")
+        template_layout = QVBoxLayout(template_group)
+        
+        self.template_input = QLineEdit()
+        self.template_input.setText("{date}_{time}_{camera}_{focal}mm_F{aperture}_ISO{iso}")
+        self.template_input.textChanged.connect(self.on_template_change)
+        template_layout.addWidget(QLabel("Шаблон:"))
+        template_layout.addWidget(self.template_input)
+        
+        # Предпросмотр
+        self.preview_label = QLabel("Пример: 2023-12-01_14-30_Canon_50mm_F2.8_ISO100.jpg")
+        self.preview_label.setStyleSheet("""
+            QLabel {
+                padding: 8px;
+                background: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                color: #6c757d;
+                font-size: 11px;
+            }
+        """)
+        self.preview_label.setWordWrap(True)
+        template_layout.addWidget(QLabel("Пример:"))
+        template_layout.addWidget(self.preview_label)
+        
+        # Быстрые кнопки
+        buttons_layout = QHBoxLayout()
+        
+        presets = [
+            ("📅 Только дата", "{date}"),
+            ("📸 Дата+Камера", "{date}_{camera}"),
+            ("⚙️ Параметры", "{date}_{focal}mm_F{aperture}_ISO{iso}"),
+            ("🎯 Подробно", "{date}_{time}_{camera}_{focal}mm_F{aperture}_{shutter}_ISO{iso}")
+        ]
+        
+        for name, template in presets:
+            btn = QPushButton(name)
+            btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 10px;
+                    padding: 3px 6px;
+                }
+            """)
+            btn.clicked.connect(lambda checked, t=template: self.set_template(t))
+            buttons_layout.addWidget(btn)
+        
+        template_layout.addLayout(buttons_layout)
+        settings_layout.addWidget(template_group)
+        
+        # Дополнительные опции
+        options_group = QGroupBox("Дополнительные настройки")
+        options_layout = QVBoxLayout(options_group)
+        
+        self.clean_names = QCheckBox("Очищать названия (удалять спецсимволы)")
+        self.clean_names.setChecked(True)
+        options_layout.addWidget(self.clean_names)
+        
+        self.lowercase = QCheckBox("Приводить к нижнему регистру")
+        self.lowercase.setChecked(False)
+        options_layout.addWidget(self.lowercase)
+        
+        self.replace_spaces = QCheckBox("Заменять пробелы на '_'")
+        self.replace_spaces.setChecked(True)
+        options_layout.addWidget(self.replace_spaces)
+        
+        settings_layout.addWidget(options_group)
+        
+        # Кнопка просмотра EXIF
+        view_btn = QPushButton("👁️ Просмотреть EXIF данных выбранного файла")
+        view_btn.clicked.connect(self.show_exif_viewer)
+        view_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        settings_layout.addWidget(view_btn)
+        
+        settings_layout.addStretch()
+        
+        layout.addWidget(self.settings_container)
+        
+        # Изначально скрываем настройки
+        self.settings_container.setVisible(False)
+    
+    def on_toggle(self):
+        """Включение/выключение EXIF"""
+        enabled = self.enable_exif.isChecked()
+        self.settings_container.setVisible(enabled)
+        self.template_changed.emit(self.template_input.text() if enabled else "")
+    
+    def on_template_change(self):
+        """Изменение шаблона"""
+        if self.enable_exif.isChecked():
+            self.template_changed.emit(self.template_input.text())
+    
+    def set_template(self, template: str):
+        """Установить шаблон"""
+        self.template_input.setText(template)
+        self.on_template_change()
+    
+    def show_exif_viewer(self):
+        """Показать просмотрщик EXIF"""
+        # Этот метод будет вызываться из основного окна
+        if hasattr(self.parent(), 'show_exif_for_selected'):
+            self.parent().show_exif_for_selected()
+    
+    def get_rules(self) -> dict:
+        """Получить правила EXIF"""
+        return {
+            'enable_exif': self.enable_exif.isChecked(),
+            'exif_template': self.template_input.text(),
+            'clean_exif_names': self.clean_names.isChecked(),
+            'exif_lowercase': self.lowercase.isChecked(),
+            'exif_replace_spaces': self.replace_spaces.isChecked()
+        }
+    
+    def set_rules(self, rules: dict):
+        """Установить правила EXIF"""
+        self.enable_exif.setChecked(rules.get('enable_exif', False))
+        self.template_input.setText(rules.get('exif_template', '{date}_{camera}'))
+        self.clean_names.setChecked(rules.get('clean_exif_names', True))
+        self.lowercase.setChecked(rules.get('exif_lowercase', False))
+        self.replace_spaces.setChecked(rules.get('exif_replace_spaces', True))
+        self.on_toggle()
+
+
+class HelpWidget(QWidget):
+    """Виджет со справочной информацией"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Заголовок
+        title = QLabel("📚 Руководство пользователя")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        title.setStyleSheet("color: #2c3e50; padding: 10px 0;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Scroll Area для длинного текста
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: #f9f9fa;
+            }
+        """)
+        
+        # Контейнер для контента
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        content_layout.setSpacing(15)
+        
+        # Разделы помощи
+        self.create_section(content_layout, "🎯 Назначение программы", 
+                           "Программа позволяет массово переименовывать файлы с использованием различных правил и шаблонов.")
+        
+        # Текст помощи
+        help_text = self.create_help_text()
+        self.create_section(content_layout, "📌 Основные возможности", help_text)
+        
+        # Быстрые подсказки
+        self.create_tips_section(content_layout)
+        
+        # Примеры
+        self.create_examples_section(content_layout)
+        
+        scroll.setWidget(content_widget)
+        layout.addWidget(scroll)
+        
+        # Кнопка обновления
+        refresh_btn = QPushButton("🔄 Обновить")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                padding: 8px 15px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        refresh_btn.clicked.connect(self.refresh_help)
+        layout.addWidget(refresh_btn)
+    
+    def create_section(self, layout, title_text, content):
+        """Создание раздела справки"""
+        section = QGroupBox(title_text)
+        section.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #3498db;
+                border-radius: 5px;
+                margin-top: 5px;
+                padding-top: 15px;
+                background-color: white;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #2c3e50;
+            }
+        """)
+        
+        section_layout = QVBoxLayout(section)
+        
+        if isinstance(content, str):
+            label = QLabel(content)
+            label.setWordWrap(True)
+            label.setStyleSheet("""
+                QLabel {
+                    font-size: 11px;
+                    line-height: 1.4;
+                    color: #34495e;
+                }
+            """)
+            section_layout.addWidget(label)
+        else:
+            section_layout.addWidget(content)
+        
+        layout.addWidget(section)
+    
+    def create_help_text(self):
+        """Создание текстового содержимого справки"""
+        help_html = """
+        <style>
+            .section { margin-bottom: 20px; }
+            .title { font-size: 13px; font-weight: bold; color: #2c3e50; margin-top: 15px; }
+            .subtitle { font-size: 12px; font-weight: bold; color: #3498db; margin-top: 10px; }
+            .content { font-size: 11px; color: #34495e; margin-left: 10px; line-height: 1.4; }
+            .example { background-color: #f8f9fa; padding: 8px; border-left: 3px solid #3498db; margin: 5px 0; }
+            .tip { background-color: #e8f4fc; padding: 8px; border-radius: 4px; margin: 5px 0; }
+            .warning { background-color: #fde8e8; padding: 8px; border-radius: 4px; margin: 5px 0; }
+            code { background-color: #ecf0f1; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        </style>
+        
+        <div class="section">
+            <div class="title">1. Базовые операции</div>
+            <div class="content">
+                <div class="subtitle">Замена текста</div>
+                <div class="content">Простой поиск и замена текста в именах файлов</div>
+                
+                <div class="subtitle">Префикс/суффикс</div>
+                <div class="content">Добавление текста в начало или конец имени файла</div>
+                
+                <div class="subtitle">Нумерация</div>
+                <div class="content">Добавление порядковых номеров к файлам</div>
+                
+                <div class="subtitle">EXIF данные</div>
+                <div class="content">Использование метаданных фотографий для именования</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="title">2. Расширенные функции</div>
+            <div class="content">
+                • <b>Регулярные выражения</b> - сложные шаблоны замены<br>
+                • <b>Фильтрация файлов</b> - по расширениям и размеру<br>
+                • <b>Сортировка</b> - по имени, дате, размеру<br>
+                • <b>Резервные копии</b> - сохранение оригиналов<br>
+                • <b>Откат операций</b> - возврат последнего переименования
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="title">3. EXIF плейсхолдеры</div>
+            <div class="content">
+                <div class="example">
+                    <code>{date}</code> - дата съемки (2024-01-15)<br>
+                    <code>{camera}</code> - модель камеры<br>
+                    <code>{focal}</code> - фокусное расстояние<br>
+                    <code>{iso}</code> - значение ISO<br>
+                    <code>{aperture}</code> - диафрагма<br>
+                    <code>{shutter}</code> - выдержка<br>
+                    <code>{lens}</code> - модель объектива
+                </div>
+                <div class="tip">
+                    <b>Пример шаблона:</b> <code>{date}_{camera}_{focal}mm_F{aperture}_ISO{iso}</code><br>
+                    <b>Результат:</b> <code>2024-01-15_Canon_50mm_F2.8_ISO100.jpg</code>
+                </div>
+            </div>
+        </div>
+        """
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setHtml(help_html)
+        text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 10px;
+                font-size: 11px;
+            }
+        """)
+        return text_edit
+    
+    def create_tips_section(self, layout):
+        """Создание раздела с подсказками"""
+        tips_widget = QWidget()
+        tips_layout = QVBoxLayout(tips_widget)
+        tips_layout.setSpacing(5)
+        
+        tips = [
+            ("✅ Всегда проверяйте предпросмотр перед применением", "#d4edda"),
+            ("📸 EXIF работает только с изображениями", "#d1ecf1"),
+            ("💾 Включайте резервные копии для важных файлов", "#fff3cd"),
+            ("🔄 Используйте откат если что-то пошло не так", "#f8d7da"),
+            ("🔍 Регулярные выражения требуют проверки синтаксиса", "#e2e3e5")
+        ]
+        
+        for tip, color in tips:
+            tip_label = QLabel(tip)
+            tip_label.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {color};
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    border-left: 4px solid #6c757d;
+                }}
+            """)
+            tip_label.setWordWrap(True)
+            tips_layout.addWidget(tip_label)
+        
+        self.create_section(layout, "💡 Быстрые подсказки", tips_widget)
+    
+    def create_examples_section(self, layout):
+        """Создание раздела с примерами"""
+        examples_html = """
+        <table border="0" cellpadding="5" cellspacing="0" style="width:100%;">
+            <tr style="background-color:#f8f9fa;">
+                <th style="text-align:left; padding:8px;">Задача</th>
+                <th style="text-align:left; padding:8px;">Настройки</th>
+                <th style="text-align:left; padding:8px;">Результат</th>
+            </tr>
+            <tr>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">Нумерация фото</td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">Нумерация: вкл, 3 цифры, с 1</td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;"><code>photo_001.jpg</code></td>
+            </tr>
+            <tr>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">Добавить дату</td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">Префикс: <code>2024-01-15_</code></td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;"><code>2024-01-15_document.pdf</code></td>
+            </tr>
+            <tr>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">EXIF именование</td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;">EXIF: вкл, шаблон <code>{date}_{camera}</code></td>
+                <td style="padding:8px; border-bottom:1px solid #dee2e6;"><code>2024-01-15_Canon.jpg</code></td>
+            </tr>
+            <tr>
+                <td style="padding:8px;">Замена текста</td>
+                <td style="padding:8px;">Замена: <code>IMG_</code> → <code>Photo_</code></td>
+                <td style="padding:8px;"><code>Photo_1234.jpg</code></td>
+            </tr>
+        </table>
+        """
+        
+        examples_edit = QTextEdit()
+        examples_edit.setReadOnly(True)
+        examples_edit.setHtml(examples_html)
+        examples_edit.setMaximumHeight(200)
+        
+        self.create_section(layout, "🎯 Примеры использования", examples_edit)
+    
+    def refresh_help(self):
+        """Обновление справки"""
+        QMessageBox.information(self, "Обновлено", "Справка обновлена")
 
 
 class RenamerWindow(QMainWindow):
@@ -81,9 +1001,45 @@ class RenamerWindow(QMainWindow):
         self.current_sort_by = 'name'
         self.current_ascending = True
         self.original_files_order = []  # Сохраняем исходный порядок файлов
+        
+        self.worker = None  # Добавляем ссылку на текущий воркер
+        
         self.setup_ui()
-
         QTimer.singleShot(0, self.initialize_disabled_fields)
+        self.setup_shortcuts()
+        
+    def closeEvent(self, event):
+        """Обработчик закрытия окна"""
+        print("Закрытие приложения...")
+        
+        # Останавливаем все активные потоки
+        if self.worker and self.worker.isRunning():
+            print("Останавливаем воркер перед закрытием...")
+            self.worker.stop()
+            
+            # Даем время потоку завершиться
+            import time
+            start_time = time.time()
+            while self.worker.isRunning() and time.time() - start_time < 3:
+                QApplication.processEvents()  # Обрабатываем события
+                time.sleep(0.1)
+            
+            if self.worker.isRunning():
+                print("Воркер все еще работает, принудительно завершаем")
+                self.worker.terminate()
+                self.worker.wait(1000)
+        
+        # Закрываем все дочерние окна
+        for widget in QApplication.topLevelWidgets():
+            if widget != self and isinstance(widget, QDialog):
+                widget.close()
+                widget.deleteLater()
+        
+        # Очищаем ресурсы
+        QApplication.processEvents()
+        
+        event.accept()
+        print("Приложение закрыто")
     
     def initialize_disabled_fields(self):
         """Инициализация всех полей как отключенных при запуске"""
@@ -91,7 +1047,10 @@ class RenamerWindow(QMainWindow):
         self.toggle_replace_mode()
         self.toggle_prefix_suffix_fields()
         self.toggle_numbering_fields()
-        self.toggle_exif_fields()
+        
+        # Инициализируем EXIF виджет
+        if hasattr(self, 'exif_widget'):
+            self.exif_widget.settings_container.setVisible(False)
         
     def setup_ui(self):
         #Настройка пользовательского интерфейса
@@ -244,6 +1203,13 @@ class RenamerWindow(QMainWindow):
         self.file_table.setColumnCount(4)
         self.file_table.setHorizontalHeaderLabels(["№", "Текущее имя", "Новое имя", "Статус"])
         
+        # Подключаем двойной клик по таблице
+        self.file_table.itemDoubleClicked.connect(self.on_file_double_clicked)
+        
+        # Добавляем контекстное меню
+        self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_table.customContextMenuRequested.connect(self.show_table_context_menu)
+        
         # Настройка таблицы
         self.file_table.setStyleSheet("""
             QTableWidget {
@@ -322,9 +1288,10 @@ class RenamerWindow(QMainWindow):
         self.create_text_replace_tab()
         self.create_prefix_suffix_tab()
         self.create_numbering_tab()
-        self.create_exif_tab()
+        self.create_exif_tab()  
         self.create_advanced_tab()
-        
+        self.create_help_tab()
+
         layout.addWidget(self.tab_widget)
         return widget
         
@@ -350,7 +1317,7 @@ class RenamerWindow(QMainWindow):
         form.setVerticalSpacing(5)
         
         # Чекбокс включения замены текста
-        self.enable_replace = QCheckBox("Включить замену текста")
+        self.enable_replace = QCheckBox("Включить замены текста")
         self.enable_replace.setChecked(False)
         self.enable_replace.stateChanged.connect(self.toggle_replace_fields)
         form.addRow(self.enable_replace)
@@ -678,7 +1645,7 @@ class RenamerWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         
         group = QGroupBox("Параметры нумерации")
-        group.setStyleSheet("""
+        group.setStyleSheet(""" 
             QGroupBox {
                 font-weight: bold;
                 border: 1px solid #ddd;
@@ -689,7 +1656,7 @@ class RenamerWindow(QMainWindow):
         """)
         
         form = QFormLayout()
-        # Уменьшаем расстояние между заголовками и полями ввода
+        # Уменьшаем расстояние между заголовками и полей ввода
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(5)
         
@@ -763,111 +1730,33 @@ class RenamerWindow(QMainWindow):
         self.number_separator.setStyleSheet(style)
         
     def create_exif_tab(self):
-        # Вкладка 'EXIF данные'
+        """Вкладка 'EXIF данные' с новым виджетом"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        group = QGroupBox("Использование метаданных EXIF")
-        group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                margin-top: 5px;
-                padding-top: 10px;
+        # Создаем EXIF виджет
+        self.exif_widget = EXIFTemplateWidget()
+        self.exif_widget.template_changed.connect(self.on_exif_template_changed)
+        layout.addWidget(self.exif_widget)
+        
+        # Информация
+        info_label = QLabel("ℹ️ EXIF данные используются только для изображений (JPG, PNG, TIFF и др.)")
+        info_label.setStyleSheet("""
+            QLabel {
+                color: #7f8c8d;
+                font-style: italic;
+                font-size: 11px;
+                padding: 5px;
+                margin-top: 10px;
+                border-top: 1px solid #dee2e6;
             }
         """)
+        layout.addWidget(info_label)
         
-        form = QFormLayout()
-        # Уменьшаем расстояние между заголовками и полями ввода
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(5)
-        
-        # Включить EXIF
-        self.enable_exif = QCheckBox("Включить EXIF данные")
-        self.enable_exif.setChecked(False)
-        self.enable_exif.stateChanged.connect(self.toggle_exif_fields)
-        form.addRow(self.enable_exif)
-        
-        # Формат даты
-        format_layout = QHBoxLayout()
-        self.date_format = QComboBox()
-        self.date_format.addItems([
-            "YYYY-MM-DD",
-            "DD-MM-YYYY", 
-            "YYYYMMDD",
-            "MM-DD-YYYY",
-            "YY-MM-DD",
-            "DD.MM.YYYY"
-        ])
-        format_layout.addWidget(self.date_format)
-        format_layout.addStretch()
-        form.addRow("Формат даты:", format_layout)
-        
-        # Позиция даты
-        date_pos_layout = QHBoxLayout()
-        self.date_prefix = QRadioButton("Префикс")
-        self.date_prefix.setChecked(True)
-        self.date_suffix = QRadioButton("Суффикс")
-        
-        date_pos_layout.addWidget(self.date_prefix)
-        date_pos_layout.addWidget(self.date_suffix)
-        date_pos_layout.addStretch()
-        form.addRow("Позиция даты:", date_pos_layout)
-        
-        # Разделитель
-        self.exif_separator = QLineEdit()
-        self.exif_separator.setText("_")
-        form.addRow("Разделитель:", self.exif_separator)
-        
-        # Дополнительные EXIF данные
-        exif_extras = QGroupBox("Дополнительные данные EXIF")
-        exif_extras.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                margin-top: 0px;
-                padding-top: 8px;
-            }
-        """)
-        extras_layout = QVBoxLayout(exif_extras)
-        extras_layout.setSpacing(3)
-        
-        self.use_camera_model = QCheckBox("Модель камеры")
-        self.use_exposure = QCheckBox("Параметры экспозиции")
-        self.use_gps = QCheckBox("Координаты GPS")
-        
-        extras_layout.addWidget(self.use_camera_model)
-        extras_layout.addWidget(self.use_exposure)
-        extras_layout.addWidget(self.use_gps)
-        
-        form.addRow(exif_extras)
-        
-        # Пример
-        example_label = QLabel("Пример: 'IMG_1234.jpg' → '2023-12-01_1234.jpg'")
-        example_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
-        form.addRow(example_label)
-        
-        group.setLayout(form)
-        layout.addWidget(group)
         layout.addStretch()
         
         self.tab_widget.addTab(tab, "EXIF")
-        
-    def toggle_exif_fields(self):
-        """Включение/выключение полей EXIF"""
-        enabled = self.enable_exif.isChecked()
-        self.date_format.setEnabled(enabled)
-        self.date_prefix.setEnabled(enabled)
-        self.date_suffix.setEnabled(enabled)
-        self.exif_separator.setEnabled(enabled)
-        self.use_camera_model.setEnabled(enabled)
-        self.use_exposure.setEnabled(enabled)
-        self.use_gps.setEnabled(enabled)
-        
-        # Меняем стиль для отключенных полей
-        style = "color: #7f8c8d;" if not enabled else ""
-        self.exif_separator.setStyleSheet(style)
-        
+    
     def create_advanced_tab(self):
         # Вкладка 'Дополнительно'
         tab = QWidget()
@@ -993,6 +1882,135 @@ class RenamerWindow(QMainWindow):
         layout.addStretch()
     
         self.tab_widget.addTab(tab, "Дополнительно")
+
+    def create_help_tab(self):
+        """Вкладка 'Помощь' со справочной информацией"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+    
+        # Создаем виджет помощи
+        self.help_widget = HelpWidget()
+        layout.addWidget(self.help_widget)
+    
+        # Кнопки быстрого доступа
+        quick_buttons = self.create_quick_help_buttons()
+        layout.addWidget(quick_buttons)
+    
+        self.tab_widget.addTab(tab, "❓ Помощь")
+    
+    def create_quick_help_buttons(self):
+        """Создание панели с кнопками быстрой помощи"""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setSpacing(10)
+        
+        buttons_info = [
+            ("📚 Полное руководство", self.show_full_manual),
+            ("🎯 Примеры", self.show_examples),
+            ("⚡ Быстрый старт", self.show_quick_start),
+            ("❓ Частые вопросы", self.show_faq)
+        ]
+        
+        for text, callback in buttons_info:
+            btn = QPushButton(text)
+            btn.setStyleSheet("""
+                QPushButton {
+                    padding: 8px 12px;
+                    background-color: #6c757d;
+                    color: white;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            btn.clicked.connect(callback)
+            layout.addWidget(btn)
+        
+        layout.addStretch()
+        return widget
+
+    def show_full_manual(self):
+        """Показать полное руководство"""
+        QMessageBox.information(self, "Полное руководство", 
+            "Полное руководство доступно во вкладке 'Помощь'.\n\n"
+            "Здесь вы найдете:\n"
+            "• Подробное описание всех функций\n"
+            "• Примеры использования\n"
+            "• Советы и рекомендации\n"
+            "• Ответы на частые вопросы")
+    
+    def show_examples(self):
+        """Показать примеры использования"""
+        examples = """
+        📸 <b>Примеры переименования:</b>
+        
+        <u>Для фотографий:</u>
+        • {date}_{camera}_{iso} → 2024-01-15_Canon_ISO100.jpg
+        • {date}_{time}_{focal}mm → 2024-01-15_14-30_50mm.jpg
+        
+        <u>Для документов:</u>
+        • Префикс + нумерация → report_001.pdf
+        • Год_месяц_название → 2024_01_budget.xlsx
+        
+        <u>Простые замены:</u>
+        • DSC_ → Photo_ (замена префикса)
+        • _ → - (замена символов)
+        • Удаление пробелов
+        """
+        
+        QMessageBox.information(self, "Примеры использования", examples)
+    
+    def show_quick_start(self):
+        """Показать быстрый старт"""
+        quick_start = """
+        🚀 <b>Быстрый старт:</b>
+        
+        1. Выберите папку с файлами
+        2. Загрузите файлы (кнопка 📥)
+        3. Настройте правила переименования
+        4. Нажмите 👁️ Предпросмотр
+        5. Примените изменения ✅
+        
+        <u>Базовые правила:</u>
+        • Префикс/суффикс - добавляет текст
+        • Нумерация - порядковые номера
+        • Замена текста - поиск и замена
+        • EXIF - данные из фотографий
+        
+        <u>Важно:</u>
+        • Всегда проверяйте предпросмотр!
+        • Используйте резервные копии
+        """
+        
+        QMessageBox.information(self, "Быстрый старт", quick_start)
+    
+    def show_faq(self):
+        """Показать частые вопросы"""
+        faq = """
+        ❓ <b>Частые вопросы:</b>
+        
+        <u>1. Почему EXIF не работает?</u>
+        • Файл не является изображением
+        • В изображении нет EXIF данных
+        • Проверьте расширение файла
+        
+        <u>2. Как отменить переименование?</u>
+        • Используйте кнопку ↩️ Откатить
+        • Работает только для последней операции
+        
+        <u>3. Почему файлы не загружаются?</u>
+        • Проверьте фильтры (расширения, размер)
+        • Убедитесь что в папке есть файлы
+        
+        <u>4. Как использовать регулярные выражения?</u>
+        • Включите режим "Регулярные выражения"
+        • Проверяйте синтаксис в предпросмотре
+        """
+        
+        QMessageBox.information(self, "Частые вопросы", faq)
         
     def create_action_buttons(self):
         # Создание секции с кнопками действий
@@ -1204,7 +2222,7 @@ class RenamerWindow(QMainWindow):
             extensions = self.filter_extensions.text()
             filtered_files = self.file_manager.filter_files_by_extension(all_files, extensions)
             
-            # Применяем фильтрацию по размеру
+            # Применяем фильтрация по размеру
             min_size = self.min_size.value()
             filtered_files = self.file_manager.filter_files_by_size(filtered_files, folder_path, min_size)
             
@@ -1420,15 +2438,6 @@ class RenamerWindow(QMainWindow):
             'number_separator': self.number_separator.text(),
             'number_position': 'prefix' if self.number_prefix.isChecked() else 'suffix',
             
-            # EXIF
-            'enable_exif': self.enable_exif.isChecked(),
-            'date_format': self.date_format.currentText(),
-            'exif_position': 'prefix' if self.date_prefix.isChecked() else 'suffix',
-            'exif_separator': self.exif_separator.text(),
-            'use_camera_model': self.use_camera_model.isChecked(),
-            'use_exposure': self.use_exposure.isChecked(),
-            'use_gps': self.use_gps.isChecked(),
-            
             # Дополнительно
             'lowercase_ext': self.lowercase_ext.isChecked(),
             'remove_spaces': self.remove_spaces.isChecked(),
@@ -1439,6 +2448,10 @@ class RenamerWindow(QMainWindow):
             'ascending': self.current_ascending,
         }
         
+        # Добавляем EXIF правила из виджета
+        if hasattr(self, 'exif_widget'):
+            rules.update(self.exif_widget.get_rules())
+        
         return rules
         
     def preview_changes(self):
@@ -1446,6 +2459,14 @@ class RenamerWindow(QMainWindow):
         if not self.current_files or not self.current_folder:
             QMessageBox.warning(self, "Внимание", "Сначала загрузите файлы!")
             return
+        
+        # Если уже есть запущенный воркер, останавливаем его
+        if self.worker and self.worker.isRunning():
+            print("Останавливаем предыдущий воркер перед запуском нового...")
+            self.worker.stop()
+            # Ждем немного для завершения
+            import time
+            time.sleep(0.5)
         
         # Блокируем кнопки во время обработки
         self.preview_btn.setEnabled(False)
@@ -1466,8 +2487,14 @@ class RenamerWindow(QMainWindow):
         self.worker.preview_finished.connect(self.on_preview_finished)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.error_occurred.connect(self.on_preview_error)
+        self.worker.finished.connect(self.on_worker_finished)
         self.worker.start()
         
+    def on_worker_finished(self):
+        """Обработчик завершения работы воркера"""
+        print("Воркер завершил работу")
+        self.worker = None  # Сбрасываем ссылку на воркер
+    
     def on_preview_finished(self, results: Dict[str, str]):
         # Обработка завершения предпросмотра
         self.preview_results = results
@@ -1696,7 +2723,6 @@ class RenamerWindow(QMainWindow):
         self.enable_replace.setChecked(False)
         self.enable_prefix_suffix.setChecked(False)
         self.enable_numbering.setChecked(False)
-        self.enable_exif.setChecked(False)
         
         # Сбрасываем поля ввода для замены текста
         self.replace_from.clear()
@@ -1717,13 +2743,6 @@ class RenamerWindow(QMainWindow):
         self.number_separator.setText("_")
         self.number_suffix.setChecked(True)
         
-        self.date_format.setCurrentIndex(0)
-        self.date_prefix.setChecked(True)
-        self.exif_separator.setText("_")
-        self.use_camera_model.setChecked(False)
-        self.use_exposure.setChecked(False)
-        self.use_gps.setChecked(False)
-        
         self.lowercase_ext.setChecked(True)
         self.remove_spaces.setChecked(False)
         self.keep_original.setChecked(False)
@@ -1731,6 +2750,16 @@ class RenamerWindow(QMainWindow):
         self.min_size.setValue(0)
         self.sort_by_name.setChecked(True)
         self.sort_asc.setChecked(True)
+        
+        # Сбрасываем EXIF виджет
+        if hasattr(self, 'exif_widget'):
+            self.exif_widget.set_rules({
+                'enable_exif': False,
+                'exif_template': '{date}_{time}_{camera}_{focal}mm_F{aperture}_ISO{iso}',
+                'clean_exif_names': True,
+                'exif_lowercase': False,
+                'exif_replace_spaces': True
+            })
         
         # Сбрасываем таблицу к исходным именам (если есть файлы)
         if self.current_files:
@@ -1751,3 +2780,183 @@ class RenamerWindow(QMainWindow):
         
         # Обновляем видимость групп параметров
         self.toggle_replace_mode()
+    
+    def show_table_context_menu(self, position):
+        """Показать контекстное меню для таблицы"""
+        current_row = self.file_table.currentRow()
+        if current_row < 0:
+            return
+        
+        menu = QMenu()
+    
+        view_exif_action = menu.addAction("👁️ Просмотреть EXIF")
+        preview_single_action = menu.addAction("🔍 Предпросмотр для этого файла")
+    
+        # Добавляем разделитель и новый пункт
+        menu.addSeparator()
+        help_action = menu.addAction("❓ Справка по переименованию")
+    
+        action = menu.exec_(self.file_table.mapToGlobal(position))
+    
+        if action == view_exif_action:
+            self.show_exif_for_selected()
+        elif action == preview_single_action:
+            self.preview_single_file()
+        elif action == help_action:
+            self.show_context_help()
+
+    def show_context_help(self):
+        """Показать контекстную справку"""
+        help_text = """
+        💡 <b>Справка по переименованию:</b>
+    
+        <u>Доступные действия:</u>
+        • 👁️ Просмотреть EXIF - детальная информация о фото
+        • 🔍 Предпросмотр для файла - тест правил на одном файле
+    
+        <u>Экспресс-советы:</u>
+        • Используйте EXIF для фото (вкладка EXIF)
+        • Для документов - префиксы и нумерация
+        • Регулярные выражения для сложных замен
+    
+        <u>Перейти к полной справке:</u>
+        Откройте вкладку '❓ Помощь'
+        """
+    
+        QMessageBox.information(self, "Контекстная справка", help_text)
+    
+    def on_file_double_clicked(self, item):
+        """Обработка двойного клика по файлу"""
+        if item.column() in [0, 1, 2]:  # Клик по имени файлу
+            self.show_exif_for_selected()
+    
+    def preview_single_file(self):
+        """Предпросмотр для выбранного файла"""
+        current_row = self.file_table.currentRow()
+        if current_row >= 0 and self.current_folder:
+            filename = self.file_table.item(current_row, 1).text()
+            file_path = os.path.join(self.current_folder, filename)
+            
+            if os.path.exists(file_path):
+                # Собираем текущие правила
+                rules = self.collect_rules()
+                
+                # Применяем правила только к этому файлу
+                try:
+                    new_name = RulesEngine.generate_new_name(filename, current_row, rules)
+                    
+                    # Применяем EXIF если нужно
+                    if rules.get('enable_exif', False):
+                        template = rules.get('exif_template', '{date}_{camera}')
+                        exif_name = EXIFProcessor.generate_filename_from_exif(
+                            new_name, file_path, template
+                        )
+                        
+                        # Применяем дополнительные настройки
+                        if rules.get('clean_exif_names', True):
+                            exif_name = EXIFProcessor.clean_for_filename(exif_name)
+                        
+                        if rules.get('exif_lowercase', False):
+                            name_part, ext = os.path.splitext(exif_name)
+                            exif_name = name_part.lower() + ext
+                        
+                        if rules.get('exif_replace_spaces', True):
+                            exif_name = exif_name.replace(' ', '_')
+                        
+                        new_name = exif_name
+                    
+                    # Показываем результат
+                    QMessageBox.information(
+                        self,
+                        "Предпросмотр",
+                        f"Файл: {filename}\n\n"
+                        f"Будет переименован в:\n{new_name}\n\n"
+                        f"Правила EXIF: {'Включены' if rules.get('enable_exif') else 'Выключены'}"
+                    )
+                    
+                    # Обновляем ячейку в таблице
+                    self.file_table.item(current_row, 2).setText(new_name)
+                    
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", f"Ошибка предпросмотра:\n{str(e)}")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Файл не найден")
+        else:
+            QMessageBox.warning(self, "Внимание", "Сначала выберите файл в таблице")
+    
+    def show_exif_for_selected(self):
+        """Показать EXIF данные для выбранного файла"""
+        try:
+            current_row = self.file_table.currentRow()
+            if current_row >= 0 and self.current_folder:
+                filename = self.file_table.item(current_row, 1).text()
+                file_path = os.path.join(self.current_folder, filename)
+                
+                # Проверяем существование файла
+                if not os.path.exists(file_path):
+                    QMessageBox.warning(self, "Ошибка", f"Файл не найден:\n{file_path}")
+                    return
+                
+                try:
+                    # Проверяем, является ли файл изображением
+                    image_extensions = ['.jpg', '.jpeg', '.png', '.tiff', '.tif', 
+                                       '.bmp', '.gif', '.webp', '.heic', '.nef', 
+                                       '.cr2', '.arw', '.dng']
+                    ext = os.path.splitext(filename)[1].lower()
+                    
+                    if ext in image_extensions:
+                        try:
+                            # Создаем диалог с текущим окном как родителем
+                            dialog = EXIFPreviewDialog(file_path, self)
+                            
+                            # Устанавливаем текущий шаблон из виджета
+                            if hasattr(self, 'exif_widget'):
+                                current_template = self.exif_widget.template_input.text()
+                                dialog.template_input.setText(current_template)
+                            
+                            # Открываем как модальное окно
+                            dialog.exec_()
+                        except Exception as e:
+                            QMessageBox.critical(self, "Ошибка", 
+                                f"Не удалось открыть EXIF данные:\n{str(e)}\n\n"
+                                f"Файл: {filename}\n"
+                                f"Проверьте, что файл не поврежден и доступен для чтения.")
+                    else:
+                        QMessageBox.information(
+                            self,
+                            "Информация",
+                            f"Файл {filename} не является изображением\n"
+                            f"EXIF данные доступны только для изображений."
+                        )
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", 
+                        f"Ошибка при обработке файла:\n{str(e)}\n\n"
+                        f"Файл: {filename}")
+            else:
+                QMessageBox.warning(self, "Внимание", "Сначала выберите файл в таблице")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", 
+                f"Непредвиденная ошибка:\n{str(e)}\n\n"
+                f"Попробуйте выбрать другой файл.")
+    
+    def setup_shortcuts(self):
+        """Настройка горячих клавиш"""
+        # F1 - открыть справку
+        help_shortcut = QShortcut(QKeySequence.HelpContents, self)
+        help_shortcut.activated.connect(self.open_help_tab)
+    
+        # Ctrl+H - тоже открыть справку
+        ctrl_h_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        ctrl_h_shortcut.activated.connect(self.open_help_tab)
+
+    def open_help_tab(self):
+        """Открыть вкладку помощи"""
+        # Переключаемся на вкладку помощи (6-я вкладка)
+        self.tab_widget.setCurrentIndex(5)
+        self.status_label.setText("Открыта справка пользователя")
+        
+    def on_exif_template_changed(self, template: str):
+        """Обработка изменения EXIF шаблона"""
+        if template and self.current_files:
+            # Обновляем предпросмотр
+            self.preview_changes()
